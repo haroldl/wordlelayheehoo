@@ -92,10 +92,10 @@ fn game_state_equality_ignores_guess_order() {
     let mut forward = GameState::new();
     let mut reverse = GameState::new();
 
-    forward = forward.with_guess(first, first_result);
-    forward = forward.with_guess(second, second_result);
-    reverse = reverse.with_guess(second, second_result);
-    reverse = reverse.with_guess(first, first_result);
+    forward = forward.with_guess(first, first_result).unwrap();
+    forward = forward.with_guess(second, second_result).unwrap();
+    reverse = reverse.with_guess(second, second_result).unwrap();
+    reverse = reverse.with_guess(first, first_result).unwrap();
 
     assert_eq!(forward, reverse);
     assert_eq!(forward.guesses().len(), 2);
@@ -104,15 +104,18 @@ fn game_state_equality_ignores_guess_order() {
 }
 
 #[test]
-fn game_state_ignores_duplicate_pairs() {
+fn game_state_rejects_duplicate_words_regardless_of_feedback() {
     let word = Word::new("apple").unwrap();
     let result = Result::from_guess(word, word);
     let empty = GameState::new();
-    let state = empty.with_guess(word, result);
+    let state = empty.with_guess(word, result).unwrap();
     let duplicate = state.with_guess(word, result);
 
     assert!(empty.guesses().is_empty());
-    assert_eq!(duplicate, state);
+    assert_eq!(duplicate, None);
+    assert_eq!(state.with_guess(word, Result::new([Grey; 5])), None);
+    assert!(state.has_guessed(Word::new("APPLE").unwrap()));
+    assert_eq!(state.with_guess(Word::new("APPLE").unwrap(), result), None);
     assert_eq!(state.guesses().len(), 1);
 }
 
@@ -121,8 +124,8 @@ fn game_state_equality_includes_feedback() {
     let word = Word::new("apple").unwrap();
     let mut green_state = GameState::new();
     let mut grey_state = GameState::new();
-    green_state = green_state.with_guess(word, Result::new([Green; 5]));
-    grey_state = grey_state.with_guess(word, Result::new([Grey; 5]));
+    green_state = green_state.with_guess(word, Result::new([Green; 5])).unwrap();
+    grey_state = grey_state.with_guess(word, Result::new([Grey; 5])).unwrap();
 
     assert_ne!(green_state, grey_state);
 }
@@ -138,7 +141,7 @@ fn empty_state_allows_every_dictionary_word_in_order() {
 fn all_green_feedback_leaves_only_the_guessed_word() {
     let word = Word::new("apple").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(word, Result::new([Green; 5]));
+    state = state.with_guess(word, Result::new([Green; 5])).unwrap();
     assert_eq!(state.possible_solutions().collect::<Vec<_>>(), vec![word]);
 }
 
@@ -148,7 +151,7 @@ fn possible_solutions_respect_duplicate_letters_and_additional_guesses() {
     let ample = Word::new("ample").unwrap();
     let allee = Word::new("allee").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(allee, Result::new([Green, Gold, Grey, Grey, Green]));
+    state = state.with_guess(allee, Result::new([Green, Gold, Grey, Grey, Green])).unwrap();
 
     let initial: Vec<_> = state.possible_solutions().collect();
     assert!(initial.contains(&apple));
@@ -156,7 +159,7 @@ fn possible_solutions_respect_duplicate_letters_and_additional_guesses() {
     assert!(!initial.contains(&allee));
     assert!(!initial.contains(&Word::new("alley").unwrap()));
 
-    state = state.with_guess(ample, Result::new([Green, Grey, Green, Green, Green]));
+    state = state.with_guess(ample, Result::new([Green, Grey, Green, Green, Green])).unwrap();
     let narrowed: Vec<_> = state.possible_solutions().collect();
     assert!(narrowed.contains(&apple));
     assert!(!narrowed.contains(&ample));
@@ -167,8 +170,8 @@ fn possible_solutions_respect_duplicate_letters_and_additional_guesses() {
 fn contradictory_feedback_has_no_possible_solution() {
     let word = Word::new("apple").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(word, Result::new([Green; 5]));
-    state = state.with_guess(word, Result::new([Grey; 5]));
+    state = state.with_guess(word, Result::new([Green; 5])).unwrap();
+    state = state.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
     assert_eq!(state.possible_solutions().next(), None);
 }
 
@@ -180,7 +183,7 @@ fn state_sets_deduplicate_regardless_of_guess_order() {
     let reverse = possible_states_after_guesses(&[second, first]);
     let repeated = possible_states_after_guesses(&[first, second, first]);
     assert_eq!(forward, reverse);
-    assert_eq!(forward, repeated);
+    assert!(repeated.is_empty());
     assert!(forward.len() < WORDS.len());
     assert!(forward.iter().all(|state| state.guesses().len() == 2));
 }
@@ -193,7 +196,7 @@ fn generated_states_cover_every_target() {
     for &target in WORDS {
         let mut expected = GameState::new();
         for guess in guesses {
-            expected = expected.with_guess(guess, Result::from_guess(guess, target));
+            expected = expected.with_guess(guess, Result::from_guess(guess, target)).unwrap();
         }
         assert!(states.contains(&expected), "missing target {}", target.as_str());
         witnessed.insert(expected);
@@ -222,7 +225,7 @@ fn partial_matches_do_not_solve_the_game() {
             let mut feedback = [Green; 5];
             feedback[position] = non_green;
             let mut state = GameState::new();
-            state = state.with_guess(guess, Result::new(feedback));
+            state = state.with_guess(guess, Result::new(feedback)).unwrap();
             assert!(!state.is_solved());
         }
     }
@@ -235,7 +238,7 @@ fn correct_guess_solves_game_regardless_of_other_guesses() {
     for guesses in [[miss, target], [target, miss]] {
         let mut state = GameState::new();
         for guess in guesses {
-            state = state.with_guess(guess, Result::from_guess(guess, target));
+            state = state.with_guess(guess, Result::from_guess(guess, target)).unwrap();
         }
         assert!(state.is_solved());
     }
@@ -255,7 +258,7 @@ fn make_guess_preserves_history_and_only_uses_current_candidates() {
     let first = Word::new("allee").unwrap();
     let guess = Word::new("ample").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(first, Result::from_guess(first, target));
+    state = state.with_guess(first, Result::from_guess(first, target)).unwrap();
     let original = state.clone();
     let next_states = state.make_guess(guess);
     assert_eq!(state, original);
@@ -279,22 +282,22 @@ fn make_guess_preserves_history_and_only_uses_current_candidates() {
 }
 
 #[test]
-fn repeating_a_guess_returns_the_same_state() {
+fn repeating_a_guess_has_no_successors() {
     let guess = Word::new("arose").unwrap();
     let target = Word::new("apple").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(guess, Result::from_guess(guess, target));
+    state = state.with_guess(guess, Result::from_guess(guess, target)).unwrap();
     let next = state.make_guess(guess);
-    assert_eq!(next.len(), 1);
-    assert!(next.contains(&state));
+    assert!(next.is_empty());
+    assert_eq!(state.guesses().len(), 1);
 }
 
 #[test]
 fn make_guess_on_contradictory_state_has_no_outcomes() {
     let word = Word::new("apple").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(word, Result::new([Green; 5]));
-    state = state.with_guess(word, Result::new([Grey; 5]));
+    state = state.with_guess(word, Result::new([Green; 5])).unwrap();
+    state = state.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
     assert!(state.make_guess(Word::new("arose").unwrap()).is_empty());
 }
 
@@ -303,10 +306,10 @@ fn make_guess_after_a_win_scores_against_the_known_target() {
     let target = Word::new("apple").unwrap();
     let guess = Word::new("arose").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(target, Result::new([Green; 5]));
+    state = state.with_guess(target, Result::new([Green; 5])).unwrap();
     let next = state.make_guess(guess);
     let mut expected = state.clone();
-    expected = expected.with_guess(guess, Result::from_guess(guess, target));
+    expected = expected.with_guess(guess, Result::from_guess(guess, target)).unwrap();
     assert_eq!(next.len(), 1);
     assert!(next.contains(&expected));
 }
@@ -315,10 +318,10 @@ fn make_guess_after_a_win_scores_against_the_known_target() {
 fn adding_feedback_preserves_states_already_in_a_hash_set() {
     let target = Word::new("apple").unwrap();
     let first = Word::new("arose").unwrap();
-    let original = GameState::new().with_guess(first, Result::from_guess(first, target));
+    let original = GameState::new().with_guess(first, Result::from_guess(first, target)).unwrap();
     let mut states = std::collections::HashSet::from([original.clone()]);
     let stored = states.get(&original).unwrap();
-    let extended = stored.with_guess(target, Result::new([Green; 5]));
+    let extended = stored.with_guess(target, Result::new([Green; 5])).unwrap();
 
     assert_eq!(original.guesses().len(), 1);
     assert!(!original.is_solved());
@@ -339,7 +342,7 @@ fn game_is_lost_at_or_beyond_the_guess_limit() {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter().take(MAX_GUESSES + 1).enumerate()
     {
-        state = state.with_guess(guess, Result::from_guess(guess, target));
+        state = state.with_guess(guess, Result::from_guess(guess, target)).unwrap();
         assert_eq!(state.is_game_lost(), index + 1 >= MAX_GUESSES);
     }
     assert_eq!(state.guesses().len(), MAX_GUESSES + 1);
@@ -348,12 +351,12 @@ fn game_is_lost_at_or_beyond_the_guess_limit() {
 #[test]
 fn solved_game_is_not_lost_at_or_beyond_the_guess_limit() {
     let target = Word::new("apple").unwrap();
-    let mut state = GameState::new().with_guess(target, Result::new([Green; 5]));
+    let mut state = GameState::new().with_guess(target, Result::new([Green; 5])).unwrap();
     for guess in WORDS.iter().copied().filter(|&word| word != target)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter().take(MAX_GUESSES)
     {
-        state = state.with_guess(guess, Result::from_guess(guess, target));
+        state = state.with_guess(guess, Result::from_guess(guess, target)).unwrap();
         assert!(!state.is_game_lost());
     }
     assert_eq!(state.guesses().len(), MAX_GUESSES + 1);

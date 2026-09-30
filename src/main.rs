@@ -122,7 +122,7 @@ impl Result {
 
 /// An immutable, unordered set of guesses and their observed feedback.
 /// Adding observations returns a new state, leaving the original unchanged.
-/// Adding the same (Word, Result) pair again produces an equal state.
+/// Each word can be guessed only once, regardless of its feedback.
 /// Equality compares the pairs regardless of insertion order. This stores
 /// observations only; it does not check whether they share a possible target.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -151,21 +151,33 @@ impl GameState {
     }
 
     /// Returns a new state containing this guess and its observed feedback.
-    /// The original state is unchanged; an existing pair produces an equal state.
+    /// Returns None if this word has already been guessed, regardless of feedback.
+    /// The original state is unchanged.
     /// Feedback is recorded as supplied, without checking target consistency.
     #[must_use = "with_guess returns a new state without changing the original"]
-    pub fn with_guess(&self, word: Word, result: Result) -> Self {
+    pub fn with_guess(&self, word: Word, result: Result) -> Option<Self> {
+        if self.has_guessed(word) {
+            return None;
+        }
         let mut guesses = self.guesses.clone();
         guesses.insert((word, result));
-        Self { guesses }
+        Some(Self { guesses })
+    }
+
+    /// Returns whether this word has already been guessed.
+    pub fn has_guessed(&self, word: Word) -> bool {
+        self.guesses.iter().any(|&(guess, _)| guess == word)
     }
 
     /// Returns the distinct next states for a guess against current candidates.
     /// Each possible target supplies feedback; targets with identical feedback
     /// produce one state. Existing observations are preserved and self is unchanged.
-    /// Returns an empty set if no dictionary target matches the current state.
+    /// Returns an empty set if the word was already guessed or no target matches.
     /// Like possible_states_after_guesses, this also scores guesses after a win.
     pub fn make_guess(&self, guess: Word) -> HashSet<Self> {
+        if self.has_guessed(guess) {
+            return HashSet::new();
+        }
         let results: HashSet<Result> = self
             .possible_solutions()
             .map(|target| Result::from_guess(guess, target))
@@ -173,7 +185,7 @@ impl GameState {
 
         results
             .into_iter()
-            .map(|result| self.with_guess(guess, result))
+            .filter_map(|result| self.with_guess(guess, result))
             .collect()
     }
 
@@ -187,8 +199,7 @@ impl GameState {
     }
 
     /// Returns true when the guess limit has been reached without a correct guess.
-    /// Counts distinct recorded pairs; repeated identical guesses are not tracked
-    /// separately by this set-based state model.
+    /// Each recorded pair represents one distinct guessed word.
     pub fn is_game_lost(&self) -> bool {
         self.guesses.len() >= MAX_GUESSES && !self.is_solved()
     }
@@ -218,11 +229,15 @@ impl GameState {
 /// Each target supplies all feedback in a state; impossible combinations of
 /// results are never generated. All supplied guesses are scored, even if an
 /// earlier guess matches the target. Equal states are stored only once.
+/// Returns an empty set when the supplied guesses contain a repeated word.
 pub fn possible_states_after_guesses(guesses: &[Word]) -> HashSet<GameState> {
+    if guesses.iter().collect::<HashSet<_>>().len() != guesses.len() {
+        return HashSet::new();
+    }
     WORDS
         .iter()
-        .map(|&target| {
-            guesses.iter().fold(GameState::new(), |state, &guess| {
+        .filter_map(|&target| {
+            guesses.iter().try_fold(GameState::new(), |state, &guess| {
                 state.with_guess(guess, Result::from_guess(guess, target))
             })
         })
@@ -231,6 +246,7 @@ pub fn possible_states_after_guesses(guesses: &[Word]) -> HashSet<GameState> {
 
 fn main() {
     println!("Loaded {} five-letter words.", WORDS.len());
+    // Fixed opening for faster development; the model also supports an empty state.
     let first_guess = Word(*b"arose");
     let second_guess = Word(*b"unlit");
     let game_states = possible_states_after_guesses(&[first_guess, second_guess]);
