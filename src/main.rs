@@ -27,6 +27,9 @@ include!(concat!(env!("OUT_DIR"), "/words.rs"));
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
+/// Maximum number of guesses allowed in a game.
+pub const MAX_GUESSES: usize = 6;
+
 /// Five lowercase ASCII letters, stored inline without padding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -181,6 +184,13 @@ impl GameState {
         self.guesses
             .iter()
             .any(|(_, result)| result.0 == [LetterResult::Green; 5])
+    }
+
+    /// Returns true when the guess limit has been reached without a correct guess.
+    /// Counts distinct recorded pairs; repeated identical guesses are not tracked
+    /// separately by this set-based state model.
+    pub fn is_game_lost(&self) -> bool {
+        self.guesses.len() >= MAX_GUESSES && !self.is_solved()
     }
 
     /// Lazily yields words from WORDS consistent with every recorded result.

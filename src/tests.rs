@@ -1,4 +1,4 @@
-use super::{GameState, LetterResult, Result, Word, WORDS, possible_states_after_guesses};
+use super::{GameState, LetterResult, MAX_GUESSES, Result, Word, WORDS, possible_states_after_guesses};
 use LetterResult::{Gold, Green, Grey};
 
 #[test]
@@ -328,4 +328,33 @@ fn adding_feedback_preserves_states_already_in_a_hash_set() {
     assert!(!states.contains(&extended));
     assert!(states.insert(extended));
     assert_eq!(states.len(), 2);
+}
+
+#[test]
+fn game_is_lost_at_or_beyond_the_guess_limit() {
+    let target = Word::new("apple").unwrap();
+    let mut state = GameState::new();
+    assert!(!state.is_game_lost());
+    for (index, guess) in WORDS.iter().copied().filter(|&word| word != target)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter().take(MAX_GUESSES + 1).enumerate()
+    {
+        state = state.with_guess(guess, Result::from_guess(guess, target));
+        assert_eq!(state.is_game_lost(), index + 1 >= MAX_GUESSES);
+    }
+    assert_eq!(state.guesses().len(), MAX_GUESSES + 1);
+}
+
+#[test]
+fn solved_game_is_not_lost_at_or_beyond_the_guess_limit() {
+    let target = Word::new("apple").unwrap();
+    let mut state = GameState::new().with_guess(target, Result::new([Green; 5]));
+    for guess in WORDS.iter().copied().filter(|&word| word != target)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter().take(MAX_GUESSES)
+    {
+        state = state.with_guess(guess, Result::from_guess(guess, target));
+        assert!(!state.is_game_lost());
+    }
+    assert_eq!(state.guesses().len(), MAX_GUESSES + 1);
 }
