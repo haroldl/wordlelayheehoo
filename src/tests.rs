@@ -559,7 +559,7 @@ fn queued_minimax_matches_exhaustive_search_with_one_ten_and_twenty_workers() {
 fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
     // A shared suffix makes each missed candidate eliminate only itself.
     // More than 16 words forces work into multiple queue jobs.
-    let words: Vec<_> = (b'a'..=b't').map(|letter| Word([letter, b'z', b'z', b'z', b'z'])).collect();
+    let words: Vec<_> = (b'a'..=b't').map(|letter| Word::new(&format!("{}zzzz", char::from(letter))).unwrap()).collect();
     for workers in [1, 10, 20] {
         let solver = super::solver::MinimaxSolver::new(workers);
         assert_eq!(solver.minimum_guesses(&words, &words, 3), None);

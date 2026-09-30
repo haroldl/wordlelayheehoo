@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-use crate::{Result, Word};
+use crate::words::{Result, Word};
 
 const PATTERNS: usize = 243;
 const ALL_GREEN: usize = PATTERNS - 1;
