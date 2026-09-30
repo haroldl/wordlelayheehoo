@@ -361,3 +361,185 @@ fn solved_game_is_not_lost_at_or_beyond_the_guess_limit() {
     }
     assert_eq!(state.guesses().len(), MAX_GUESSES + 1);
 }
+
+#[test]
+fn minimax_counts_the_final_guess_and_respects_budget() {
+    let words: Vec<_> = ["aaaaa", "baaaa", "caaaa"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    assert_eq!(super::solver::minimum_guesses(&words, &words[..1], 1), Some(1));
+    assert_eq!(super::solver::minimum_guesses(&words, &words[..1], 0), None);
+    assert_eq!(super::solver::minimum_guesses(&words, &words, 2), None);
+    assert_eq!(super::solver::minimum_guesses(&words, &words, 3), Some(3));
+    assert_eq!(super::solver::minimum_guesses(&words, &[], 3), None);
+}
+
+#[test]
+fn minimax_can_use_a_non_candidate_probe() {
+    let candidates: Vec<_> = ["aaaaa", "baaaa", "caaaa"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    let mut allowed = candidates.clone();
+    allowed.push(Word::new("bcddd").unwrap());
+    // bcddd produces three distinct non-winning results, then the answer
+    // must be guessed. Guessing only candidates takes three in the worst case.
+    assert_eq!(super::solver::minimum_guesses(&allowed, &candidates, 2), Some(2));
+    allowed.push(allowed[0]);
+    let mut repeated = candidates.clone();
+    repeated.push(candidates[0]);
+    assert_eq!(super::solver::minimum_guesses(&allowed, &repeated, 2), Some(2));
+}
+
+// Independent exhaustive recurrence for tiny dictionaries, with no memoization,
+// depth feasibility search, ranking, or capacity pruning.
+fn exhaustive_minimax(allowed: &[Word], candidates: &[Word]) -> usize {
+    let mut best = candidates.len();
+    for &guess in allowed {
+        let mut groups: std::collections::HashMap<Result, Vec<Word>> =
+            std::collections::HashMap::new();
+        for &target in candidates {
+            if guess != target {
+                groups.entry(Result::from_guess(guess, target)).or_default().push(target);
+            }
+        }
+        if groups.values().any(|group| group.len() == candidates.len()) {
+            continue;
+        }
+        let worst = groups.values().map(|group| exhaustive_minimax(allowed, group))
+            .max().unwrap_or(0);
+        best = best.min(1 + worst);
+    }
+    best
+}
+
+#[test]
+fn minimax_matches_exhaustive_search_on_every_small_candidate_subset() {
+    let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    for mask in 1..(1 << allowed.len()) {
+        let candidates: Vec<_> = allowed.iter().enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .map(|(_, &word)| word).collect();
+        let expected = exhaustive_minimax(&allowed, &candidates);
+        assert_eq!(
+            super::solver::minimum_guesses(&allowed, &candidates, expected),
+            Some(expected), "subset {mask}"
+        );
+        assert_eq!(
+            super::solver::minimum_guesses(&allowed, &candidates, expected - 1),
+            None, "subset {mask} fits below its optimum"
+        );
+    }
+}
+
+#[test]
+fn minimax_game_state_handles_solved_inconsistent_and_exhausted_states() {
+    let target = Word::new("apple").unwrap();
+    let solved = GameState::new().with_guess(target, Result::new([Green; 5])).unwrap();
+    assert_eq!(solved.minimax_guesses(), Some(0));
+    let inconsistent = solved.with_guess(
+        Word::new("ample").unwrap(), Result::new([Grey; 5])
+    ).unwrap();
+    assert_eq!(inconsistent.minimax_guesses(), None);
+
+    let exhausted = WORDS.iter().copied().filter(|&word| word != target)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter().take(MAX_GUESSES)
+        .fold(GameState::new(), |state, guess| {
+            state.with_guess(guess, Result::from_guess(guess, target)).unwrap()
+        });
+    assert_eq!(exhausted.minimax_guesses(), None);
+}
+
+#[test]
+fn minimax_solves_a_state_after_the_development_opening() {
+    let target = Word::new("apple").unwrap();
+    let state = ["arose", "unlit"].into_iter().fold(GameState::new(), |state, text| {
+        let guess = Word::new(text).unwrap();
+        state.with_guess(guess, Result::from_guess(guess, target)).unwrap()
+    });
+    let candidates: Vec<_> = state.possible_solutions().collect();
+    assert!(candidates.contains(&target));
+    let allowed: Vec<_> = WORDS.iter().copied().filter(|&word| !state.has_guessed(word)).collect();
+    assert!(candidates.len() > 1);
+    // A separating guess is a two-turn certificate: each result identifies
+    // one target, which can then be guessed. Multiple targets rule out one turn.
+    let has_separating_guess = allowed.iter().any(|&guess| {
+        let patterns: std::collections::HashSet<_> = candidates.iter()
+            .map(|&target| Result::from_guess(guess, target)).collect();
+        patterns.len() == candidates.len()
+    });
+    assert!(has_separating_guess);
+    assert_eq!(state.minimax_guesses(), Some(2));
+}
+
+#[test]
+fn minimax_searches_multiple_levels_when_guesses_only_eliminate_one_target() {
+    let words: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "eaaaa"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    // Every miss leaves all other targets indistinguishable, so all five
+    // guesses can be necessary. Depth four exercises recursive failed branches.
+    assert_eq!(super::solver::minimum_guesses(&words, &words, 4), None);
+    assert_eq!(super::solver::minimum_guesses(&words, &words, 5), Some(5));
+}
+
+#[test]
+fn parallel_minimax_matches_serial_maximum_and_preserves_failure() {
+    let target = Word::new("apple").unwrap();
+    let solved = GameState::new().with_guess(target, Result::new([Green; 5])).unwrap();
+    let opening = ["arose", "unlit"].into_iter().fold(GameState::new(), |state, text| {
+        let guess = Word::new(text).unwrap();
+        state.with_guess(guess, Result::from_guess(guess, target)).unwrap()
+    });
+    let mut states = std::collections::HashSet::from([solved.clone(), opening]);
+    let serial = states.iter().map(GameState::minimax_guesses)
+        .try_fold(0usize, |worst, next| next.map(|count| worst.max(count)));
+    assert_eq!(serial, Some(2));
+    assert_eq!(super::max_minimax_guesses(&states, 10), serial);
+
+    let impossible = solved.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
+    states.insert(impossible);
+    assert_eq!(super::max_minimax_guesses(&states, 10), None);
+    assert_eq!(super::max_minimax_guesses(&std::collections::HashSet::new(), 10), Some(0));
+}
+
+#[test]
+fn worker_count_arguments_are_validated() {
+    assert_eq!(super::parse_workers(&[]), Ok(10));
+    for count in [1, 10, 20] {
+        assert_eq!(super::parse_workers(&["--workers".into(), count.to_string()]), Ok(count));
+    }
+    for args in [vec!["--workers", "0"], vec!["--workers", "-1"],
+        vec!["--workers", "abc"], vec!["--workers"], vec!["--other", "20"]]
+    {
+        assert!(super::parse_workers(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+    }
+}
+
+#[test]
+fn queued_minimax_matches_exhaustive_search_with_one_ten_and_twenty_workers() {
+    let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    for workers in [1, 10, 20] {
+        let solver = super::solver::MinimaxSolver::new(workers);
+        for mask in 1..(1 << allowed.len()) {
+            let candidates: Vec<_> = allowed.iter().enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, &word)| word).collect();
+            let expected = exhaustive_minimax(&allowed, &candidates);
+            // Reuse a pool after both success (with cancellation) and failure.
+            assert_eq!(solver.minimum_guesses(&allowed, &candidates, expected), Some(expected));
+            assert_eq!(solver.minimum_guesses(&allowed, &candidates, expected - 1), None);
+        }
+    }
+}
+
+#[test]
+fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
+    // A shared suffix makes each missed candidate eliminate only itself.
+    // More than 16 words forces work into multiple queue jobs.
+    let words: Vec<_> = (b'a'..=b't').map(|letter| Word([letter, b'z', b'z', b'z', b'z'])).collect();
+    for workers in [1, 10, 20] {
+        let solver = super::solver::MinimaxSolver::new(workers);
+        assert_eq!(solver.minimum_guesses(&words, &words, 3), None);
+        assert_eq!(solver.minimum_guesses(&words, &words[..1], 1), Some(1));
+    }
+}

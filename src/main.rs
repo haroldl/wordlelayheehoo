@@ -24,11 +24,16 @@
 // regenerate this file whenever WORD.LST changes.
 include!(concat!(env!("OUT_DIR"), "/words.rs"));
 
+mod solver;
+
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// Maximum number of guesses allowed in a game.
 pub const MAX_GUESSES: usize = 6;
+
+/// Default number of minimax workers; override with --workers N.
+pub const DEFAULT_SOLVER_WORKERS: usize = 10;
 
 /// Five lowercase ASCII letters, stored inline without padding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -219,6 +224,38 @@ impl GameState {
         })
     }
 
+    /// Returns the minimum worst-case number of additional guesses to win.
+    /// Returns Some(0) for a consistent solved state, or None if no dictionary
+    /// target fits or no strategy guarantees a win within MAX_GUESSES total.
+    /// Searches all unguessed dictionary words, including non-candidate probes.
+    /// Exact search can be expensive for large candidate sets.
+    pub fn minimax_guesses(&self) -> Option<usize> {
+        self.minimax_guesses_with_workers(DEFAULT_SOLVER_WORKERS)
+    }
+
+    /// Runs minimax using a fixed pool of workers; workers must be positive.
+    pub fn minimax_guesses_with_workers(&self, workers: usize) -> Option<usize> {
+        self.minimax_guesses_using(&solver::MinimaxSolver::new(workers))
+    }
+
+    fn minimax_guesses_using(&self, solver: &solver::MinimaxSolver) -> Option<usize> {
+        let candidates: Vec<_> = self.possible_solutions().collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        if self.is_solved() {
+            return Some(0);
+        }
+        let allowed: Vec<_> = WORDS.iter().copied()
+            .filter(|&word| !self.has_guessed(word))
+            .collect();
+        solver.minimum_guesses(
+            &allowed,
+            &candidates,
+            MAX_GUESSES.saturating_sub(self.guesses.len()),
+        )
+    }
+
     /// Borrows the recorded pairs. Iteration order is unspecified.
     pub fn guesses(&self) -> &HashSet<(Word, Result)> {
         &self.guesses
@@ -244,18 +281,62 @@ pub fn possible_states_after_guesses(guesses: &[Word]) -> HashSet<GameState> {
         .collect()
 }
 
+/// Reuses one pool across states; queued work is inside each minimax search.
+fn max_minimax_guesses(game_states: &HashSet<GameState>, workers: usize) -> Option<usize> {
+    let solver = solver::MinimaxSolver::new(workers);
+    game_states.iter()
+        .map(|state| state.minimax_guesses_using(&solver))
+        .try_fold(0usize, |worst, next| next.map(|count| worst.max(count)))
+}
+
+fn parse_workers(args: &[String]) -> std::result::Result<usize, String> {
+    match args {
+        [] => Ok(DEFAULT_SOLVER_WORKERS),
+        [flag, value] if flag == "--workers" => value.parse::<usize>()
+            .ok().filter(|&count| count > 0)
+            .ok_or_else(|| "--workers requires a positive integer".to_owned()),
+        _ => Err("usage: wordlelayheehoo [--workers N]".to_owned()),
+    }
+}
+
 fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--help"] {
+        println!("Usage: wordlelayheehoo [--workers N] (default: {DEFAULT_SOLVER_WORKERS})");
+        return;
+    }
+    let workers = parse_workers(&args).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    println!("Using {workers} minimax workers.");
+
     println!("Loaded {} five-letter words.", WORDS.len());
     // Fixed opening for faster development; the model also supports an empty state.
     let first_guess = Word(*b"arose");
-    let second_guess = Word(*b"unlit");
-    let game_states = possible_states_after_guesses(&[first_guess, second_guess]);
+    // let second_guess = Word(*b"unlit");
+    // let game_states = possible_states_after_guesses(&[first_guess, second_guess]);
+    // println!(
+    //     "{} possible game states after guessing {} and {}.",
+    //     game_states.len(),
+    //     first_guess.as_str(),
+    //     second_guess.as_str()
+    // );
+    let game_states = possible_states_after_guesses(&[first_guess]);
     println!(
-        "{} possible game states after guessing {} and {}.",
+        "{} possible game states after guessing only {}.",
         game_states.len(),
-        first_guess.as_str(),
-        second_guess.as_str()
+        first_guess.as_str()
     );
+
+    let max_guesses = max_minimax_guesses(&game_states, workers);
+
+    match max_guesses {
+        Some(count) => println!("Worst case: {count} additional guesses after the opening."),
+        None => println!(
+            "At least one state cannot be guaranteed solved within {MAX_GUESSES} total guesses."
+        ),
+    }
 }
 
 #[cfg(test)]
