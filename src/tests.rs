@@ -1,3 +1,4 @@
+use clap::Parser;
 use super::{GameState, LetterResult, MAX_GUESSES, Result, Word, WORDS, possible_states_after_guesses};
 use LetterResult::{Gold, Green, Grey};
 
@@ -503,14 +504,36 @@ fn parallel_minimax_matches_serial_maximum_and_preserves_failure() {
 
 #[test]
 fn worker_count_arguments_are_validated() {
-    assert_eq!(super::parse_workers(&[]), Ok(10));
+    let defaults = super::Args::try_parse_from(["wordlelayheehoo"]).unwrap();
+    assert_eq!(defaults.workers.get(), super::DEFAULT_SOLVER_WORKERS);
+
     for count in [1, 10, 20] {
-        assert_eq!(super::parse_workers(&["--workers".into(), count.to_string()]), Ok(count));
+        let value = count.to_string();
+        for flag in ["--workers", "-w"] {
+            let args = super::Args::try_parse_from(["wordlelayheehoo", flag, &value]).unwrap();
+            assert_eq!(args.workers.get(), count);
+        }
     }
-    for args in [vec!["--workers", "0"], vec!["--workers", "-1"],
-        vec!["--workers", "abc"], vec!["--workers"], vec!["--other", "20"]]
-    {
-        assert!(super::parse_workers(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+    for args in [
+        vec!["--workers", "0"],
+        vec!["--workers", "-1"],
+        vec!["--workers", "abc"],
+        vec!["--workers"],
+        vec!["--other", "20"],
+    ] {
+        let command = std::iter::once("wordlelayheehoo").chain(args);
+        assert!(super::Args::try_parse_from(command).is_err());
+    }
+}
+
+#[test]
+fn cli_supports_help_and_version() {
+    for (flag, kind) in [
+        ("--help", clap::error::ErrorKind::DisplayHelp),
+        ("--version", clap::error::ErrorKind::DisplayVersion),
+    ] {
+        let result = super::Args::try_parse_from(["wordlelayheehoo", flag]);
+        assert!(matches!(result, Err(error) if error.kind() == kind && error.exit_code() == 0));
     }
 }
 

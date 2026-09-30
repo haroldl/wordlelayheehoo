@@ -29,11 +29,27 @@ mod solver;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
+use clap::Parser;
+use std::num::NonZeroUsize;
+
 /// Maximum number of guesses allowed in a game.
 pub const MAX_GUESSES: usize = 6;
 
 /// Default number of minimax workers; override with --workers N.
 pub const DEFAULT_SOLVER_WORKERS: usize = 10;
+
+#[derive(Parser)]
+#[command(version, about = "Wordle minimax solver")]
+struct Args {
+    /// Number of solver worker threads
+    #[arg(
+        short = 'w',
+        long,
+        default_value_t = NonZeroUsize::new(DEFAULT_SOLVER_WORKERS)
+            .expect("default worker count must be positive")
+    )]
+    workers: NonZeroUsize,
+}
 
 /// Five lowercase ASCII letters, stored inline without padding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -289,26 +305,9 @@ fn max_minimax_guesses(game_states: &HashSet<GameState>, workers: usize) -> Opti
         .try_fold(0usize, |worst, next| next.map(|count| worst.max(count)))
 }
 
-fn parse_workers(args: &[String]) -> std::result::Result<usize, String> {
-    match args {
-        [] => Ok(DEFAULT_SOLVER_WORKERS),
-        [flag, value] if flag == "--workers" => value.parse::<usize>()
-            .ok().filter(|&count| count > 0)
-            .ok_or_else(|| "--workers requires a positive integer".to_owned()),
-        _ => Err("usage: wordlelayheehoo [--workers N]".to_owned()),
-    }
-}
-
 fn main() {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    if args == ["--help"] {
-        println!("Usage: wordlelayheehoo [--workers N] (default: {DEFAULT_SOLVER_WORKERS})");
-        return;
-    }
-    let workers = parse_workers(&args).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2);
-    });
+    let args = Args::parse();
+    let workers = args.workers.get();
     println!("Using {workers} minimax workers.");
 
     println!("Loaded {} five-letter words.", WORDS.len());
