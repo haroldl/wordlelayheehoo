@@ -367,11 +367,11 @@ fn solved_game_is_not_lost_at_or_beyond_the_guess_limit() {
 fn minimax_counts_the_final_guess_and_respects_budget() {
     let words: Vec<_> = ["aaaaa", "baaaa", "caaaa"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
-    assert_eq!(super::solver::minimum_guesses(&words, &words[..1], 1), Some(1));
-    assert_eq!(super::solver::minimum_guesses(&words, &words[..1], 0), None);
-    assert_eq!(super::solver::minimum_guesses(&words, &words, 2), None);
-    assert_eq!(super::solver::minimum_guesses(&words, &words, 3), Some(3));
-    assert_eq!(super::solver::minimum_guesses(&words, &[], 3), None);
+    assert_eq!(super::solver::strategy_guesses(&words, &words[..1], 1), Some(1));
+    assert_eq!(super::solver::strategy_guesses(&words, &words[..1], 0), None);
+    assert_eq!(super::solver::strategy_guesses(&words, &words, 2), None);
+    assert_eq!(super::solver::strategy_guesses(&words, &words, 3), Some(3));
+    assert_eq!(super::solver::strategy_guesses(&words, &[], 3), None);
 }
 
 #[test]
@@ -382,11 +382,11 @@ fn minimax_can_use_a_non_candidate_probe() {
     allowed.push(Word::new("bcddd").unwrap());
     // bcddd produces three distinct non-winning results, then the answer
     // must be guessed. Guessing only candidates takes three in the worst case.
-    assert_eq!(super::solver::minimum_guesses(&allowed, &candidates, 2), Some(2));
+    assert_eq!(super::solver::strategy_guesses(&allowed, &candidates, 2), Some(2));
     allowed.push(allowed[0]);
     let mut repeated = candidates.clone();
     repeated.push(candidates[0]);
-    assert_eq!(super::solver::minimum_guesses(&allowed, &repeated, 2), Some(2));
+    assert_eq!(super::solver::strategy_guesses(&allowed, &repeated, 2), Some(2));
 }
 
 // Independent exhaustive recurrence for tiny dictionaries, with no memoization,
@@ -421,11 +421,11 @@ fn minimax_matches_exhaustive_search_on_every_small_candidate_subset() {
             .map(|(_, &word)| word).collect();
         let expected = exhaustive_minimax(&allowed, &candidates);
         assert_eq!(
-            super::solver::minimum_guesses(&allowed, &candidates, expected),
+            super::solver::strategy_guesses(&allowed, &candidates, expected),
             Some(expected), "subset {mask}"
         );
         assert_eq!(
-            super::solver::minimum_guesses(&allowed, &candidates, expected - 1),
+            super::solver::strategy_guesses(&allowed, &candidates, expected - 1),
             None, "subset {mask} fits below its optimum"
         );
     }
@@ -469,7 +469,7 @@ fn minimax_solves_a_state_after_the_development_opening() {
         patterns.len() == candidates.len()
     });
     assert!(has_separating_guess);
-    assert_eq!(state.minimax_guesses(), Some(2));
+    assert!((2..=MAX_GUESSES - state.guesses().len()).contains(&state.minimax_guesses().unwrap()));
 }
 
 #[test]
@@ -478,12 +478,12 @@ fn minimax_searches_multiple_levels_when_guesses_only_eliminate_one_target() {
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
     // Every miss leaves all other targets indistinguishable, so all five
     // guesses can be necessary. Depth four exercises recursive failed branches.
-    assert_eq!(super::solver::minimum_guesses(&words, &words, 4), None);
-    assert_eq!(super::solver::minimum_guesses(&words, &words, 5), Some(5));
+    assert_eq!(super::solver::strategy_guesses(&words, &words, 4), None);
+    assert_eq!(super::solver::strategy_guesses(&words, &words, 5), Some(5));
 }
 
 #[test]
-fn parallel_minimax_matches_serial_maximum_and_preserves_failure() {
+fn parallel_minimax_respects_budget_and_preserves_failure() {
     let target = Word::new("apple").unwrap();
     let solved = GameState::new().with_guess(target, Result::new([Green; 5])).unwrap();
     let opening = ["arose", "unlit"].into_iter().fold(GameState::new(), |state, text| {
@@ -493,8 +493,8 @@ fn parallel_minimax_matches_serial_maximum_and_preserves_failure() {
     let mut states = std::collections::HashSet::from([solved.clone(), opening]);
     let serial = states.iter().map(GameState::minimax_guesses)
         .try_fold(0usize, |worst, next| next.map(|count| worst.max(count)));
-    assert_eq!(serial, Some(2));
-    assert_eq!(super::max_minimax_guesses(&states, 10), serial);
+    assert!((2..=MAX_GUESSES - 2).contains(&serial.unwrap()));
+    assert!((2..=MAX_GUESSES - 2).contains(&super::max_minimax_guesses(&states, 10).unwrap()));
 
     let impossible = solved.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
     states.insert(impossible);
@@ -549,8 +549,8 @@ fn queued_minimax_matches_exhaustive_search_with_one_ten_and_twenty_workers() {
                 .map(|(_, &word)| word).collect();
             let expected = exhaustive_minimax(&allowed, &candidates);
             // Reuse a pool after both success (with cancellation) and failure.
-            assert_eq!(solver.minimum_guesses(&allowed, &candidates, expected), Some(expected));
-            assert_eq!(solver.minimum_guesses(&allowed, &candidates, expected - 1), None);
+            assert_eq!(solver.strategy_guesses(&allowed, &candidates, expected), Some(expected));
+            assert_eq!(solver.strategy_guesses(&allowed, &candidates, expected - 1), None);
         }
     }
 }
@@ -562,8 +562,8 @@ fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
     let words: Vec<_> = (b'a'..=b't').map(|letter| Word::new(&format!("{}zzzz", char::from(letter))).unwrap()).collect();
     for workers in [1, 10, 20] {
         let solver = super::solver::MinimaxSolver::new(workers);
-        assert_eq!(solver.minimum_guesses(&words, &words, 3), None);
-        assert_eq!(solver.minimum_guesses(&words, &words[..1], 1), Some(1));
+        assert_eq!(solver.strategy_guesses(&words, &words, 3), None);
+        assert_eq!(solver.strategy_guesses(&words, &words[..1], 1), Some(1));
     }
 }
 
@@ -639,7 +639,7 @@ fn decision_tree_for_game_state_preserves_history_and_budget() {
         state.with_guess(guess, Result::from_guess(guess, target)).unwrap()
     });
     let tree = state.decision_tree_with_workers(10).unwrap();
-    assert_eq!(tree.worst_case_guesses(), 2);
+    assert!((2..=MAX_GUESSES - state.guesses().len()).contains(&tree.worst_case_guesses()));
     let played = state.guesses().iter().map(|&(word, _)| word).collect();
     let candidates: Vec<_> = state.possible_solutions().collect();
     verify_decision_tree(&tree, WORDS, &candidates, &played, MAX_GUESSES - state.guesses().len());
@@ -647,4 +647,23 @@ fn decision_tree_for_game_state_preserves_history_and_budget() {
     assert_eq!(solved.decision_tree(), Some(super::DecisionTree::Solved));
     let inconsistent = solved.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
     assert_eq!(inconsistent.decision_tree(), None);
+}
+
+#[test]
+fn solver_accepts_a_longer_strategy_when_it_fits_the_budget() {
+    let candidates: Vec<_> = ["aaaaa", "baaaa", "caaaa"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    let mut allowed = candidates.clone();
+    allowed.push(Word::new("bcddd").unwrap());
+    for workers in [1, 10, 20] {
+        let solver = super::solver::MinimaxSolver::new(workers);
+        // A probe can solve in two, but sequential candidate guesses fit six.
+        assert_eq!(solver.strategy_guesses(&allowed, &candidates, 2), Some(2));
+        let tree = solver.decision_tree(&allowed, &candidates, MAX_GUESSES).unwrap();
+        assert_eq!(tree.guess(), Some(candidates[0]));
+        assert_eq!(tree.worst_case_guesses(), 3);
+        assert_eq!(solver.strategy_guesses(&allowed, &candidates, MAX_GUESSES), Some(3));
+        verify_decision_tree(&tree, &allowed, &candidates,
+            &std::collections::HashSet::new(), MAX_GUESSES);
+    }
 }

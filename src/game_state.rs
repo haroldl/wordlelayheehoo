@@ -108,7 +108,8 @@ impl GameState {
         })
     }
 
-    /// Returns the minimum worst-case number of additional guesses to win.
+    /// Returns the worst-case additional guesses for the first winning strategy found.
+    /// Uses the full remaining budget; does not minimize the number of guesses.
     /// Returns Some(0) for a consistent solved state, or None if no dictionary
     /// target fits or no strategy guarantees a win within MAX_GUESSES total.
     /// Searches all unguessed dictionary words, including non-candidate probes.
@@ -133,14 +134,15 @@ impl GameState {
         let allowed: Vec<_> = WORDS.iter().copied()
             .filter(|&word| !self.has_guessed(word))
             .collect();
-        solver.minimum_guesses(
+        solver.strategy_guesses(
             &allowed,
             &candidates,
             MAX_GUESSES.saturating_sub(self.guesses.len()),
         )
     }
 
-    /// Builds an adaptive strategy minimizing the worst-case additional guesses.
+    /// Builds an adaptive strategy that wins within MAX_GUESSES total guesses.
+    /// Accepts the first proven strategy without searching for a shorter one.
     /// Supports an empty state to choose the opening word as part of the search.
     pub fn decision_tree(&self) -> Option<solver::DecisionTree> {
         self.decision_tree_with_workers(DEFAULT_SOLVER_WORKERS)
