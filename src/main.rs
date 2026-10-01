@@ -3,12 +3,14 @@
 mod game_state;
 mod solver;
 mod words;
+mod tree_output;
 
 pub use solver::DecisionTree;
 
 pub use words::{LetterResult, Result, WORDS, Word};
 
 pub use game_state::{GameState, possible_states_after_guesses};
+#[cfg(test)]
 use game_state::max_minimax_guesses;
 
 use clap::Parser;
@@ -31,39 +33,44 @@ struct Args {
             .expect("default worker count must be positive")
     )]
     workers: NonZeroUsize,
+
+    /// Write the winning decision tree as JSON (replaces an existing file)
+    #[arg(short = 'o', long, value_name = "FILE")]
+    output: Option<std::path::PathBuf>,
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let args = Args::parse();
     let workers = args.workers.get();
     println!("Using {workers} minimax workers.");
 
     println!("Loaded {} five-letter words.", WORDS.len());
-    // Fixed opening for faster development; the model also supports an empty state.
-    let first_guess = Word::new("arose").unwrap();
-    // let second_guess = Word::new("unlit").unwrap();
-    // let game_states = possible_states_after_guesses(&[first_guess, second_guess]);
-    // println!(
-    //     "{} possible game states after guessing {} and {}.",
-    //     game_states.len(),
-    //     first_guess.as_str(),
-    //     second_guess.as_str()
-    // );
-    let game_states = possible_states_after_guesses(&[first_guess]);
-    println!(
-        "{} possible game states after guessing only {}.",
-        game_states.len(),
-        first_guess.as_str()
-    );
+    // Let the solver choose every guess, including the opening word.
+    let state = GameState::new();
+    println!("Searching from an empty game state with a {MAX_GUESSES}-guess budget.");
 
-    let max_guesses = max_minimax_guesses(&game_states, workers);
-
-    match max_guesses {
-        Some(count) => println!("Worst case: {count} additional guesses after the opening."),
+    match state.decision_tree_with_workers(workers) {
+        Some(tree) => {
+            println!("Found strategy: worst case {} total guesses.", tree.worst_case_guesses());
+            println!("Opening word: {}.", tree.guess().unwrap().as_str());
+            if let Some(path) = args.output {
+                use std::io::Write;
+                let save = || -> std::io::Result<()> {
+                    let mut writer = std::io::BufWriter::new(std::fs::File::create(&path)?);
+                    tree.write_json(&mut writer)?;
+                    writer.flush()
+                };
+                save().map_err(|error| std::io::Error::new(
+                    error.kind(), format!("could not save {}: {error}", path.display()),
+                ))?;
+                println!("Saved decision tree to {}.", path.display());
+            }
+        }
         None => println!(
-            "At least one state cannot be guaranteed solved within {MAX_GUESSES} total guesses."
+            "No strategy guarantees solving every target within {MAX_GUESSES} total guesses."
         ),
     }
+    Ok(())
 }
 
 #[cfg(test)]

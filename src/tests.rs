@@ -667,3 +667,51 @@ fn solver_accepts_a_longer_strategy_when_it_fits_the_budget() {
             &std::collections::HashSet::new(), MAX_GUESSES);
     }
 }
+
+#[test]
+fn output_file_argument_accepts_long_and_short_options() {
+    assert!(super::Args::try_parse_from(["wordlelayheehoo"]).unwrap().output.is_none());
+    for flag in ["--output", "-o"] {
+        let args = super::Args::try_parse_from(["wordlelayheehoo", flag, "strategy.json"]).unwrap();
+        assert_eq!(args.output.unwrap(), std::path::PathBuf::from("strategy.json"));
+        assert!(super::Args::try_parse_from(["wordlelayheehoo", flag]).is_err());
+    }
+}
+
+#[test]
+fn decision_tree_json_preserves_guesses_feedback_and_solved_leaves() {
+    use super::DecisionTree;
+    let tree = DecisionTree::Guess {
+        word: Word::new("arose").unwrap(),
+        branches: std::collections::HashMap::from([
+            (Result::new([Grey, Grey, Gold, Green, Grey]), DecisionTree::Guess {
+                word: Word::new("boost").unwrap(),
+                branches: std::collections::HashMap::from([
+                    (Result::new([Green; 5]), DecisionTree::Solved),
+                ]),
+            }),
+            (Result::new([Green; 5]), DecisionTree::Solved),
+        ]),
+    };
+    let mut json = Vec::new();
+    tree.write_json(&mut json).unwrap();
+    assert_eq!(String::from_utf8(json).unwrap(), r#"{
+  "guess": "arose",
+  "branches": {
+    "*****": {"solved": true},
+    "__+*_": {
+      "guess": "boost",
+      "branches": {
+        "*****": {"solved": true}
+      }
+    }
+  }
+}
+"#);
+    let mut json = Vec::new();
+    DecisionTree::Solved.write_json(&mut json).unwrap();
+    assert_eq!(json, b"{\"solved\": true}\n");
+
+    let mut full: &mut [u8] = &mut [];
+    assert_eq!(tree.write_json(&mut full).unwrap_err().kind(), std::io::ErrorKind::WriteZero);
+}

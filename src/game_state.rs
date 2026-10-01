@@ -191,6 +191,7 @@ pub fn possible_states_after_guesses(guesses: &[Word]) -> HashSet<GameState> {
 }
 
 /// Reuses one pool across states; queued work is inside each minimax search.
+#[cfg(test)]
 pub(crate) fn max_minimax_guesses(game_states: &HashSet<GameState>, workers: usize) -> Option<usize> {
     let solver = solver::MinimaxSolver::new(workers);
     game_states.iter()
