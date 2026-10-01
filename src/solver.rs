@@ -24,6 +24,14 @@ const GUESSES_PER_JOB: usize = 16;
 #[repr(transparent)]
 struct WordIndex(usize);
 
+/// Remaining candidate words and the decision tree depth allowed below this state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GameState {
+    candidates: Vec<WordIndex>,
+    /// Remaining depth budget, not this state's depth in the overall tree.
+    depth: usize,
+}
+
 /// Position in a FeedbackTable's sorted vocabulary, which may include words
 /// from earlier searches. Search::feedback_indices maps WordIndex to this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +237,8 @@ impl MinimaxSolver {
                             break;
                         }
                         if search.guess_works(&candidates, depth, guess, &found) == Some(true) {
-                            search.memo.lock().unwrap().insert((candidates.to_vec(), depth), Some(guess));
+                            let state = GameState { candidates: candidates.to_vec(), depth };
+                            search.memo.lock().unwrap().insert(state, Some(guess));
                             found.store(true, Ordering::Relaxed);
                             break;
                         }
@@ -282,10 +291,8 @@ struct Search {
     // Indexed by WordIndex; values refer to the shared feedback vocabulary.
     feedback_indices: Vec<FeedbackWordIndex>,
     // Locks cover lookups and inserts only, never scoring or recursive search.
-    // Key: the game state as the list of remaining candidate words not ruled out,
-    //      and the remaining allowed decision tree depth.
     // Value: Some(guess) is a complete winning proof; None is a proven failure.
-    memo: Mutex<HashMap<(Vec<WordIndex>, usize), Option<WordIndex>>>,
+    memo: Mutex<HashMap<GameState, Option<WordIndex>>>,
 }
 
 impl Search {
@@ -297,7 +304,8 @@ impl Search {
         let guess = if candidates.len() <= depth {
             candidates[0]
         } else {
-            self.memo.lock().unwrap().get(&(candidates.to_vec(), depth))
+            let state = GameState { candidates: candidates.to_vec(), depth };
+            self.memo.lock().unwrap().get(&state)
                 .copied().flatten().expect("successful search must retain a winning guess")
         };
         let word = self.words[guess.0];
@@ -367,8 +375,8 @@ impl Search {
         if depth <= 1 || candidates.len() > capacity(depth) {
             return Some(false);
         }
-        let key = (candidates.to_vec(), depth);
-        if let Some(&answer) = self.memo.lock().unwrap().get(&key) {
+        let state = GameState { candidates: candidates.to_vec(), depth };
+        if let Some(&answer) = self.memo.lock().unwrap().get(&state) {
             return Some(answer.is_some());
         }
 
@@ -394,7 +402,7 @@ impl Search {
                 continue;
             }
             if largest < depth {
-                self.memo.lock().unwrap().insert(key, Some(guess));
+                self.memo.lock().unwrap().insert(state, Some(guess));
                 return Some(true);
             }
             let squares: usize = counts.iter().map(|&count| count * count).sum();
@@ -403,11 +411,11 @@ impl Search {
         ranked.sort_unstable();
         for (_, _, guess) in ranked {
             if self.guess_works(candidates, depth, guess, stop)? {
-                self.memo.lock().unwrap().insert(key, Some(guess));
+                self.memo.lock().unwrap().insert(state, Some(guess));
                 return Some(true);
             }
         }
-        self.memo.lock().unwrap().insert(key, None);
+        self.memo.lock().unwrap().insert(state, None);
         Some(false)
     }
 }
