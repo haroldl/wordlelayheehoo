@@ -1,50 +1,39 @@
-//! Human-readable decision-tree JSON: "_" grey, "+" gold, "*" green.
-//! Only validated ASCII words and fixed feedback symbols are emitted as strings;
-//! none can contain a JSON quote, backslash, or control character.
+//! Human-readable decision-tree JSON, serialized with serde_json.
 
 use std::io::{self, Write};
-
+use serde_json::{Value, json};
 use crate::{DecisionTree, LetterResult};
 
 impl DecisionTree {
     /// Writes indented JSON with sorted feedback branches and a trailing newline.
-    /// Guess nodes have "guess" and "branches" fields; leaves are {"solved": true}.
+    /// Final guesses use {"guess": "...", "solved": true}; solved leaves omit guess.
     /// Feedback keys use "_" for grey, "+" for gold, and "*" for green.
     pub fn write_json(&self, writer: &mut impl Write) -> io::Result<()> {
-        self.write_json_node(writer, 0)?;
+        serde_json::to_writer_pretty(&mut *writer, &self.json_value()).map_err(|error| {
+            io::Error::new(error.io_error_kind().unwrap_or(io::ErrorKind::InvalidData), error)
+        })?;
         writeln!(writer)
     }
 
-    fn write_json_node(&self, writer: &mut impl Write, indent: usize) -> io::Result<()> {
+    fn json_value(&self) -> Value {
         match self {
-            Self::Solved => write!(writer, "{{\"solved\": true}}"),
+            Self::Solved => json!({ "solved": true }),
             Self::Guess { word, branches } => {
-                writeln!(writer, "{{")?;
-                writeln!(writer, "{:width$}\"guess\": \"{}\",", "", word.as_str(), width = indent + 2)?;
-                write!(writer, "{:width$}\"branches\": {{", "", width = indent + 2)?;
-                let mut branches: Vec<_> = branches.iter().map(|(result, next)| {
+                if branches.len() == 1 && branches.iter().any(|(result, next)| {
+                    result.as_slice() == [LetterResult::Green; 5]
+                        && matches!(next, Self::Solved)
+                }) {
+                    return json!({ "guess": word.as_str(), "solved": true });
+                }
+                let branches: serde_json::Map<String, Value> = branches.iter().map(|(result, next)| {
                     let pattern: String = result.as_slice().iter().map(|letter| match letter {
                         LetterResult::Grey => '_',
                         LetterResult::Gold => '+',
                         LetterResult::Green => '*',
                     }).collect();
-                    (pattern, next)
+                    (pattern, next.json_value())
                 }).collect();
-                branches.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                for (index, (pattern, next)) in branches.iter().enumerate() {
-                    if index > 0 {
-                        write!(writer, ",")?;
-                    }
-                    writeln!(writer)?;
-                    write!(writer, "{:width$}\"{pattern}\": ", "", width = indent + 4)?;
-                    next.write_json_node(writer, indent + 4)?;
-                }
-                if !branches.is_empty() {
-                    writeln!(writer)?;
-                    write!(writer, "{:width$}", "", width = indent + 2)?;
-                }
-                writeln!(writer, "}}")?;
-                write!(writer, "{:width$}}}", "", width = indent)
+                json!({ "guess": word.as_str(), "branches": branches })
             }
         }
     }

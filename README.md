@@ -27,6 +27,7 @@ cargo run --release -- -w 20 -o tree.json
 | `--sample-percent PERCENT` | `100` | Percentage of dictionary entries used for both guesses and targets. Must be greater than 0 and at most 100; decimals are supported. |
 | `-w`, `--workers N` | `10` | Number of solver workers; must be positive. |
 | `-o`, `--output FILE` | No file | Write the winning decision tree as indented JSON, replacing an existing file. |
+| `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit worker and sampling options. |
 | `-h`, `--help` | | Show command-line help. |
 
 ## Random sampling
@@ -41,9 +42,23 @@ cargo run --release -- --sample-percent 0.1 -o small-tree.json
 
 Each sampled run receives a fresh random seed; there is currently no command-line seed option. A successful strategy guarantees a win only for the selected targets, using guesses from that same sample. It does not establish that the full dictionary can be solved within six guesses.
 
+## Load a saved strategy
+
+```bash
+cargo run --release -- --load-tree tree.json
+```
+
+This reports the saved opening word and worst-case length without starting solver workers or sampling the dictionary. To write it back in the current format:
+
+```bash
+cargo run --release -- --load-tree tree.json -o copy.json
+```
+
+Reading and writing use `serde_json`. Both compact final guesses and older explicit `*****` branches are accepted. Loading validates the tree structure, words, feedback symbols, and repeated guesses along a path; it does not re-run the solver to prove dictionary coverage. Invalid or unreadable files produce an error rather than starting a new search.
+
 ## Reading the decision tree
 
-Each node contains a `guess` word and a `branches` object. After making the guess, follow the key matching the observed feedback, in letter order:
+Each decision node contains a `guess` word and a `branches` object. A final guess whose only outcome is all green has `"solved": true` in place of `branches`. After making the guess, follow the key matching the observed feedback, in letter order:
 
 | Symbol | Feedback |
 | --- | --- |
@@ -60,15 +75,13 @@ For example, this complete tree distinguishes `apple` and `ample`:
     "*****": {"solved": true},
     "*_***": {
       "guess": "ample",
-      "branches": {
-        "*****": {"solved": true}
-      }
+      "solved": true
     }
   }
 }
 ```
 
-Only reachable feedback outcomes appear. A `{"solved": true}` leaf means the target has been guessed correctly. The file is written only after a winning strategy is found; if no strategy is found, an existing output file is left unchanged.
+Only reachable feedback outcomes appear. A `{"solved": true}` leaf means the target has been guessed correctly. A node containing both `guess` and `"solved": true` tells you to play that final word to win. The file is written only after a winning strategy is found; if no strategy is found, an existing output file is left unchanged.
 
 ## Tests
 

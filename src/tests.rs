@@ -695,22 +695,20 @@ fn decision_tree_json_preserves_guesses_feedback_and_solved_leaves() {
     };
     let mut json = Vec::new();
     tree.write_json(&mut json).unwrap();
-    assert_eq!(String::from_utf8(json).unwrap(), r#"{
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap(), serde_json::from_str::<serde_json::Value>(r#"{
   "guess": "arose",
   "branches": {
     "*****": {"solved": true},
     "__+*_": {
       "guess": "boost",
-      "branches": {
-        "*****": {"solved": true}
-      }
+      "solved": true
     }
   }
 }
-"#);
+"#).unwrap());
     let mut json = Vec::new();
     DecisionTree::Solved.write_json(&mut json).unwrap();
-    assert_eq!(json, b"{\"solved\": true}\n");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap(), serde_json::json!({"solved": true}));
 
     let mut full: &mut [u8] = &mut [];
     assert_eq!(tree.write_json(&mut full).unwrap_err().kind(), std::io::ErrorKind::WriteZero);
@@ -748,4 +746,60 @@ fn sampling_preserves_full_dictionary_and_selects_without_replacement() {
         super::sampling::sample_words(&words, 50.0, &mut repeated_rng),
         super::sampling::sample_words(&words, 50.0, &mut original_rng),
     );
+}
+
+#[test]
+fn saved_trees_round_trip_through_json() {
+    let words: Vec<_> = ["apple", "ample", "arose"].into_iter()
+        .map(|text| Word::new(text).unwrap()).collect();
+    let tree = super::solver::MinimaxSolver::new(1).decision_tree(&words, &words, 3).unwrap();
+    let mut bytes = Vec::new();
+    tree.write_json(&mut bytes).unwrap();
+    assert_eq!(super::DecisionTree::read_json(bytes.as_slice()).unwrap(), tree);
+    let mut again = Vec::new();
+    super::DecisionTree::read_json(bytes.as_slice()).unwrap().write_json(&mut again).unwrap();
+    assert_eq!(bytes, again);
+}
+
+#[test]
+fn loads_compact_legacy_and_solved_tree_nodes() {
+    let compact = br#"{"guess":"apple","solved":true}"#;
+    let legacy = br#"{"guess":"apple","branches":{"*****":{"solved":true}}}"#;
+    let tree = super::DecisionTree::read_json(&compact[..]).unwrap();
+    assert_eq!(tree.worst_case_guesses(), 1);
+    assert_eq!(tree, super::DecisionTree::read_json(&legacy[..]).unwrap());
+    assert_eq!(super::DecisionTree::read_json(&b"{\"solved\":true}"[..]).unwrap(), super::DecisionTree::Solved);
+    let escaped = br#"{"guess":"\u0061pple","solved":true}"#;
+    assert_eq!(tree, super::DecisionTree::read_json(&escaped[..]).unwrap());
+}
+
+#[test]
+fn rejects_invalid_saved_tree_nodes() {
+    for text in [
+        "", "null", "[]", "{}", r#"{"solved":false}"#,
+        r#"{"guess":"four","solved":true}"#,
+        r#"{"guess":"apple","solved":true,"branches":{}}"#,
+        r#"{"guess":"apple","branches":{}}"#,
+        r#"{"guess":"apple","branches":{"abcde":{"solved":true}}}"#,
+        r#"{"guess":"apple","branches":{"****":{"solved":true}}}"#,
+        r#"{"guess":"apple","branches":{"_____":{"solved":true}}}"#,
+        r#"{"guess":"apple","branches":{"_____":{"guess":"apple","solved":true}}}"#,
+        r#"{"guess":"apple","branches":{"*****":{"guess":"ample","solved":true}}}"#,
+        r#"{"solved":true,"unknown":1}"#, r#"{"solved":true} trailing"#,
+    ] {
+        assert_eq!(super::DecisionTree::read_json(text.as_bytes()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData, "{text}");
+    }
+}
+
+#[test]
+fn load_tree_cli_accepts_output_and_rejects_search_options() {
+    let args = super::Args::try_parse_from(["wordlelayheehoo", "--load-tree", "tree.json", "-o", "copy.json"]).unwrap();
+    assert_eq!(args.load_tree.unwrap(), std::path::PathBuf::from("tree.json"));
+    for extra in [vec!["-w", "2"], vec!["--sample-percent", "10"]] {
+        assert!(super::Args::try_parse_from(
+            ["wordlelayheehoo", "--load-tree", "tree.json"].into_iter().chain(extra)
+        ).is_err());
+    }
+    assert!(super::Args::try_parse_from(["wordlelayheehoo", "--load-tree"]).is_err());
 }
