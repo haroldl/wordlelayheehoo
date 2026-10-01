@@ -94,8 +94,8 @@ impl DecisionTree {
     }
 }
 
-/// Reusable minimax worker pool. A search can occupy the entire pool even when
-/// there is only one GameState to evaluate. No nested worker pools are created.
+/// Reusable minimax worker pool. Each search distributes opening guesses across
+/// the pool; recursive searches run within those jobs without nested pools.
 pub struct MinimaxSolver {
     sender: Option<mpsc::Sender<Job>>,
     workers: Vec<JoinHandle<()>>,
@@ -150,6 +150,7 @@ impl MinimaxSolver {
 
     /// Returns the actual worst-case length of the first strategy found.
     /// This need not be the minimum achievable length.
+    #[cfg(test)]
     pub fn strategy_guesses(
         &mut self,
         allowed: &[Word],

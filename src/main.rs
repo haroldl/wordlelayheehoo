@@ -1,6 +1,5 @@
 //! This project will build a decision tree to try to fully solve Wordle.
 
-mod game_state;
 mod solver;
 mod words;
 mod tree_output;
@@ -10,10 +9,6 @@ mod sampling;
 pub use solver::DecisionTree;
 
 pub use words::{LetterResult, Result, WORDS, Word};
-
-pub use game_state::{GameState, possible_states_after_guesses};
-#[cfg(test)]
-use game_state::max_minimax_guesses;
 
 use clap::Parser;
 use std::num::NonZeroUsize;
