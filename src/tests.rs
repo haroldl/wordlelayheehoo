@@ -566,3 +566,85 @@ fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
         assert_eq!(solver.minimum_guesses(&words, &words[..1], 1), Some(1));
     }
 }
+
+fn verify_decision_tree(
+    tree: &super::DecisionTree,
+    allowed: &[Word],
+    candidates: &[Word],
+    played: &std::collections::HashSet<Word>,
+    budget: usize,
+) {
+    let super::DecisionTree::Guess { word, branches } = tree else {
+        panic!("an unguessed target needs a guess node");
+    };
+    assert!(budget > 0);
+    assert!(allowed.contains(word));
+    let mut played = played.clone();
+    assert!(played.insert(*word), "strategy repeated a guess");
+    let mut groups: std::collections::HashMap<Result, Vec<Word>> = std::collections::HashMap::new();
+    for &target in candidates {
+        groups.entry(Result::from_guess(*word, target)).or_default().push(target);
+    }
+    assert_eq!(branches.len(), groups.len(), "unreachable feedback branch");
+    assert_eq!(tree.guess(), Some(*word));
+    for (result, targets) in groups {
+        let next = tree.after_result(result).expect("missing reachable feedback branch");
+        if result == Result::new([Green; 5]) {
+            assert_eq!(targets, vec![*word]);
+            assert_eq!(next, &super::DecisionTree::Solved);
+        } else {
+            verify_decision_tree(next, allowed, &targets, &played, budget - 1);
+        }
+    }
+}
+
+#[test]
+fn decision_trees_cover_all_targets_at_the_exhaustive_optimum() {
+    let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    for workers in [1, 10, 20] {
+        let solver = super::solver::MinimaxSolver::new(workers);
+        for mask in 1..(1 << allowed.len()) {
+            let candidates: Vec<_> = allowed.iter().enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, &word)| word).collect();
+            let optimum = exhaustive_minimax(&allowed, &candidates);
+            let tree = solver.decision_tree(&allowed, &candidates, optimum).unwrap();
+            assert_eq!(tree.worst_case_guesses(), optimum);
+            verify_decision_tree(&tree, &allowed, &candidates, &std::collections::HashSet::new(), optimum);
+            assert_eq!(solver.decision_tree(&allowed, &candidates, optimum - 1), None);
+        }
+    }
+}
+
+#[test]
+fn decision_tree_includes_non_candidate_probe_and_final_correct_guess() {
+    let candidates: Vec<_> = ["aaaaa", "baaaa", "caaaa"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    let probe = Word::new("bcddd").unwrap();
+    let mut allowed = candidates.clone();
+    allowed.push(probe);
+    let solver = super::solver::MinimaxSolver::new(10);
+    let tree = solver.decision_tree(&allowed, &candidates, 2).unwrap();
+    assert_eq!(tree.guess(), Some(probe));
+    assert_eq!(tree.after_result(Result::new([Green; 5])), None);
+    verify_decision_tree(&tree, &allowed, &candidates, &std::collections::HashSet::new(), 2);
+}
+
+#[test]
+fn decision_tree_for_game_state_preserves_history_and_budget() {
+    let target = Word::new("apple").unwrap();
+    let state = ["arose", "unlit"].into_iter().fold(GameState::new(), |state, text| {
+        let guess = Word::new(text).unwrap();
+        state.with_guess(guess, Result::from_guess(guess, target)).unwrap()
+    });
+    let tree = state.decision_tree_with_workers(10).unwrap();
+    assert_eq!(tree.worst_case_guesses(), 2);
+    let played = state.guesses().iter().map(|&(word, _)| word).collect();
+    let candidates: Vec<_> = state.possible_solutions().collect();
+    verify_decision_tree(&tree, WORDS, &candidates, &played, MAX_GUESSES - state.guesses().len());
+    let solved = state.with_guess(target, Result::new([Green; 5])).unwrap();
+    assert_eq!(solved.decision_tree(), Some(super::DecisionTree::Solved));
+    let inconsistent = solved.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
+    assert_eq!(inconsistent.decision_tree(), None);
+}

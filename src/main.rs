@@ -4,6 +4,8 @@ mod game_state;
 mod solver;
 mod words;
 
+pub use solver::DecisionTree;
+
 pub use words::{LetterResult, Result, WORDS, Word};
 
 pub use game_state::{GameState, possible_states_after_guesses};

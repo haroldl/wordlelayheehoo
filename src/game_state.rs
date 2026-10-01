@@ -140,6 +140,29 @@ impl GameState {
         )
     }
 
+    /// Builds an adaptive strategy minimizing the worst-case additional guesses.
+    /// Supports an empty state to choose the opening word as part of the search.
+    pub fn decision_tree(&self) -> Option<solver::DecisionTree> {
+        self.decision_tree_with_workers(DEFAULT_SOLVER_WORKERS)
+    }
+
+    /// Builds a strategy with the configured worker count. Returns None for
+    /// inconsistent observations or no strategy within the remaining guess budget.
+    pub fn decision_tree_with_workers(&self, workers: usize) -> Option<solver::DecisionTree> {
+        let candidates: Vec<_> = self.possible_solutions().collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        if self.is_solved() {
+            return Some(solver::DecisionTree::Solved);
+        }
+        let allowed: Vec<_> = WORDS.iter().copied()
+            .filter(|&word| !self.has_guessed(word)).collect();
+        solver::MinimaxSolver::new(workers).decision_tree(
+            &allowed, &candidates, MAX_GUESSES.saturating_sub(self.guesses.len()),
+        )
+    }
+
     /// Borrows the recorded pairs. Iteration order is unspecified.
     pub fn guesses(&self) -> &HashSet<(Word, Result)> {
         &self.guesses
