@@ -98,7 +98,49 @@ fn main() -> std::io::Result<()> {
                 ))?;
                 println!("Saved decision tree to {}.", path.display());
             }
-            // TODO: add an interpreter to prompt the user at the command line with guesses and asking them to input the result
+            use std::io::{BufRead, Write};
+            let mut input = std::io::stdin().lock();
+            let mut output = std::io::stdout().lock();
+            let mut line = String::new();
+            let mut current = &tree;
+            let mut guesses = 0;
+            while let Some(word) = current.guess() {
+                write!(output,
+                    "Guess {}: {}. Enter five results (_ = grey, + = gold, * = green), or q to quit: ",
+                    guesses + 1, word.as_str(),
+                )?;
+                output.flush()?;
+                line.clear();
+                if input.read_line(&mut line)? == 0 {
+                    writeln!(output)?;
+                    return Ok(());
+                }
+                let feedback = line.trim();
+                if feedback.eq_ignore_ascii_case("q") {
+                    return Ok(());
+                }
+                if feedback.len() != 5
+                    || !feedback.bytes().all(|symbol| matches!(symbol, b'_' | b'+' | b'*'))
+                {
+                    writeln!(output, "Enter exactly five symbols using _, +, and *.")?;
+                    continue;
+                }
+                let letters = std::array::from_fn(|i| match feedback.as_bytes()[i] {
+                    b'+' => LetterResult::Gold,
+                    b'*' => LetterResult::Green,
+                    _ => LetterResult::Grey,
+                });
+                match current.after_result(Result::new(letters)) {
+                    Some(next) => {
+                        current = next;
+                        guesses += 1;
+                    }
+                    None => writeln!(output,
+                        "That result is not possible in this decision tree. Check the feedback and try again.",
+                    )?,
+                }
+            }
+            writeln!(output, "Solved in {guesses} guesses!")?;
         }
         None => println!(
             "No strategy guarantees solving every selected target within {MAX_GUESSES} total guesses."
