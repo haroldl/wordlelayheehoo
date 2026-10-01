@@ -42,9 +42,7 @@ impl FeedbackTable {
         if cached != UNCOMPUTED {
             return usize::from(cached);
         }
-        let pattern = Result::from_guess(self.words[guess], self.words[target])
-            .as_slice().iter()
-            .fold(0u8, |code, &letter| code * 3 + letter as u8);
+        let pattern = Result::from_guess(self.words[guess], self.words[target]).to_u8();
         // This byte is the whole cached value; no other data needs publishing.
         cell.store(pattern, Ordering::Relaxed);
         usize::from(pattern)

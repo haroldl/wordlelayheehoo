@@ -65,6 +65,29 @@ impl Result {
         Self(letters)
     }
 
+    /// Encodes five base-3 digits as a byte in 0..=242.
+    /// Grey = 0, Gold = 1, Green = 2; the first letter is most significant.
+    pub fn to_u8(self) -> u8 {
+        self.0.iter().fold(0u8, |code, &letter| code * 3 + letter as u8)
+    }
+
+    /// Restores feedback from its base-3 encoding; rejects bytes above 242.
+    pub fn from_u8(mut code: u8) -> Option<Self> {
+        if code > 242 {
+            return None;
+        }
+        let mut letters = [LetterResult::Grey; 5];
+        for letter in letters.iter_mut().rev() {
+            *letter = match code % 3 {
+                0 => LetterResult::Grey,
+                1 => LetterResult::Gold,
+                _ => LetterResult::Green,
+            };
+            code /= 3;
+        }
+        Some(Self(letters))
+    }
+
     /// Scores a guess against a target using Wordle's duplicate-letter rules.
     /// Exact matches consume target letters first. Remaining guess letters are
     /// scored left to right, with each unmatched target occurrence used at most

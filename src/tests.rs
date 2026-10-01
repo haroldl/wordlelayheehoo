@@ -803,3 +803,32 @@ fn load_tree_cli_accepts_output_and_rejects_search_options() {
     }
     assert!(super::Args::try_parse_from(["wordlelayheehoo", "--load-tree"]).is_err());
 }
+
+#[test]
+fn feedback_byte_encoding_preserves_digit_order() {
+    for (letters, code) in [
+        ([Grey; 5], 0),
+        ([Green; 5], 242),
+        ([Gold, Grey, Grey, Grey, Grey], 81),
+        ([Grey, Grey, Grey, Grey, Gold], 1),
+        ([Green, Gold, Grey, Green, Gold], 196),
+    ] {
+        let feedback = Result::new(letters);
+        assert_eq!(feedback.to_u8(), code);
+        assert_eq!(Result::from_u8(code), Some(feedback));
+    }
+}
+
+#[test]
+fn feedback_byte_encoding_round_trips_all_patterns_and_rejects_invalid_bytes() {
+    let mut patterns = std::collections::HashSet::new();
+    for code in 0..=242 {
+        let feedback = Result::from_u8(code).unwrap();
+        assert_eq!(feedback.to_u8(), code);
+        assert!(patterns.insert(feedback));
+    }
+    assert_eq!(patterns.len(), 243);
+    for code in 243..=u8::MAX {
+        assert_eq!(Result::from_u8(code), None);
+    }
+}
