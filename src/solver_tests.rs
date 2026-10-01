@@ -1,4 +1,4 @@
-use super::MinimaxSolver;
+use super::{FeedbackWordIndex, MinimaxSolver};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
@@ -40,8 +40,8 @@ fn cached_feedback_matches_scoring_for_every_pair() {
     for (guess_id, &guess) in table.words.iter().enumerate() {
         for (target_id, &target) in table.words.iter().enumerate() {
             let expected = crate::Result::from_guess(guess, target);
-            assert_eq!(table.pattern(guess_id, target_id), expected);
-            assert_eq!(table.pattern(guess_id, target_id), expected);
+            assert_eq!(table.pattern(FeedbackWordIndex(guess_id), FeedbackWordIndex(target_id)), expected);
+            assert_eq!(table.pattern(FeedbackWordIndex(guess_id), FeedbackWordIndex(target_id)), expected);
             assert_eq!(table.patterns[guess_id * table.words.len() + target_id], expected);
         }
     }
@@ -52,12 +52,12 @@ fn feedback_table_is_reused_across_searches_and_allowed_subsets() {
     let mut pool = MinimaxSolver::new(1);
     let words = cache_words();
     let table = pool.feedback_table(&words);
-    let first = table.pattern(0, 1);
+    let first = table.pattern(FeedbackWordIndex(0), FeedbackWordIndex(1));
     let mut subset = words[..3].to_vec();
     subset.reverse();
     let reused = pool.feedback_table(&subset);
     assert!(Arc::ptr_eq(&table, &reused));
-    assert_eq!(reused.pattern(0, 1), first);
+    assert_eq!(reused.pattern(FeedbackWordIndex(0), FeedbackWordIndex(1)), first);
     assert_eq!(pool.strategy_guesses(&subset, &subset[..1], 1), Some(1));
     assert!(Arc::ptr_eq(&table, &pool.feedback_table(&words)));
 
@@ -67,7 +67,7 @@ fn feedback_table_is_reused_across_searches_and_allowed_subsets() {
     assert!(!Arc::ptr_eq(&table, &expanded));
     assert_eq!(expanded.words.len(), table.words.len() + 1);
     assert_eq!(pool.strategy_guesses(&[extra], &[extra], 1), Some(1));
-    assert_eq!(table.pattern(0, 1), first);
+    assert_eq!(table.pattern(FeedbackWordIndex(0), FeedbackWordIndex(1)), first);
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn workers_share_precomputed_feedback_safely() {
             let mut patterns = Vec::new();
             for guess in 0..table.words.len() {
                 for target in 0..table.words.len() {
-                    patterns.push(table.pattern(guess, target));
+                    patterns.push(table.pattern(FeedbackWordIndex(guess), FeedbackWordIndex(target)));
                 }
             }
             sender.send(patterns).unwrap();

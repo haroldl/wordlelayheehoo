@@ -17,6 +17,19 @@ use crate::words::{Result, Word};
 
 const GUESSES_PER_JOB: usize = 16;
 
+/// Position in one Search's sorted, deduplicated list of allowed words.
+/// This is not an index into the global WORDS dictionary, nor is it portable
+/// between searches with different allowed words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+struct WordIndex(usize);
+
+/// Position in a FeedbackTable's sorted vocabulary, which may include words
+/// from earlier searches. Search::feedback_indices maps WordIndex to this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+struct FeedbackWordIndex(usize);
+
 /// Dense, precomputed feedback table in a stable sorted word order.
 /// Each pair occupies one byte. Workers share the completed table read-only.
 struct FeedbackTable {
@@ -36,8 +49,8 @@ impl FeedbackTable {
         Self { words, patterns }
     }
 
-    fn pattern(&self, guess: usize, target: usize) -> Result {
-        self.patterns[guess * self.words.len() + target]
+    fn pattern(&self, guess: FeedbackWordIndex, target: FeedbackWordIndex) -> Result {
+        self.patterns[guess.0 * self.words.len() + target.0]
     }
 }
 
@@ -165,12 +178,12 @@ impl MinimaxSolver {
         allowed: &[Word],
         candidates: &[Word],
         max_depth: usize,
-    ) -> Option<(Arc<Search>, Arc<Vec<usize>>, usize)> {
+    ) -> Option<(Arc<Search>, Arc<Vec<WordIndex>>, usize)> {
         let mut words = allowed.to_vec();
         words.sort_unstable();
         words.dedup();
-        let mut candidates: Vec<usize> = candidates.iter()
-            .map(|word| words.binary_search(word).ok())
+        let mut candidates: Vec<WordIndex> = candidates.iter()
+            .map(|word| words.binary_search(word).ok().map(WordIndex))
             .collect::<Option<_>>()?;
         candidates.sort_unstable();
         candidates.dedup();
@@ -180,14 +193,14 @@ impl MinimaxSolver {
 
         let feedback = self.feedback_table(&words);
         let feedback_indices = words.iter()
-            .map(|word| feedback.words.binary_search(word).unwrap()).collect();
+            .map(|word| FeedbackWordIndex(feedback.words.binary_search(word).unwrap())).collect();
         let search = Arc::new(Search {
             words, feedback, feedback_indices, memo: Mutex::new(HashMap::new()),
         });
         let candidates = Arc::new(candidates);
         // Try candidate guesses first, but retain every allowed probe word.
         let guesses: Vec<_> = candidates.iter().copied().chain(
-            (0..search.words.len()).filter(|guess| candidates.binary_search(guess).is_err())
+            (0..search.words.len()).map(WordIndex).filter(|guess| candidates.binary_search(guess).is_err())
         ).collect();
 
         let depth = max_depth;
@@ -265,17 +278,18 @@ pub(crate) fn strategy_guesses(allowed: &[Word], candidates: &[Word], depth: usi
 struct Search {
     words: Vec<Word>,
     feedback: Arc<FeedbackTable>,
-    feedback_indices: Vec<usize>,
+    // Indexed by WordIndex; values refer to the shared feedback vocabulary.
+    feedback_indices: Vec<FeedbackWordIndex>,
     // Locks cover lookups and inserts only, never scoring or recursive search.
     // Some(guess) is a complete winning proof; None is a proven failure.
-    memo: Mutex<HashMap<(Vec<usize>, usize), Option<usize>>>,
+    memo: Mutex<HashMap<(Vec<WordIndex>, usize), Option<WordIndex>>>,
 }
 
 impl Search {
     /// Replays recorded guesses without running minimax again. The sequential
     /// candidate shortcut also has a constructive proof: guess a candidate and
     /// continue on its smaller feedback groups until the target is hit.
-    fn build_tree(&self, candidates: &[usize], depth: usize) -> DecisionTree {
+    fn build_tree(&self, candidates: &[WordIndex], depth: usize) -> DecisionTree {
         assert!(depth > 0 && !candidates.is_empty());
         let guess = if candidates.len() <= depth {
             candidates[0]
@@ -283,8 +297,8 @@ impl Search {
             self.memo.lock().unwrap().get(&(candidates.to_vec(), depth))
                 .copied().flatten().expect("successful search must retain a winning guess")
         };
-        let word = self.words[guess];
-        let mut groups: HashMap<Result, Vec<usize>> = HashMap::new();
+        let word = self.words[guess.0];
+        let mut groups: HashMap<Result, Vec<WordIndex>> = HashMap::new();
         for &target in candidates {
             groups.entry(self.pattern(guess, target))
                 .or_default().push(target);
@@ -300,15 +314,20 @@ impl Search {
         DecisionTree::Guess { word, branches }
     }
 
-    fn pattern(&self, guess: usize, target: usize) -> Result {
-        self.feedback.pattern(self.feedback_indices[guess], self.feedback_indices[target])
+    fn pattern(&self, guess: WordIndex, target: WordIndex) -> Result {
+        self.feedback.pattern(self.feedback_indices[guess.0], self.feedback_indices[target.0])
     }
 
-    fn guess_works(&self, candidates: &[usize], depth: usize, guess: usize, stop: &AtomicBool) -> Option<bool> {
+    // A guess_works if we can_solve for all of the possible Result patterns we might get back if we guess this word.
+    // Mutually recursive with can_solve.
+    fn guess_works(&self, candidates: &[WordIndex], depth: usize, guess: WordIndex, stop: &AtomicBool) -> Option<bool> {
         if stop.load(Ordering::Relaxed) {
             return None;
         }
-        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); Result::COUNT];
+
+        // Add the word index for each possible target word into `groups` at the index that represents the Result
+        // pattern we get for guessing the guess word.
+        let mut groups: Vec<Vec<WordIndex>> = vec![Vec::new(); Result::COUNT];
         let limit = capacity(depth - 1);
         for &target in candidates {
             if stop.load(Ordering::Relaxed) {
@@ -332,8 +351,10 @@ impl Search {
         Some(true)
     }
 
+    // Can we solve all possible target words with some (any) choice of the candidate words as our next guess?
+    // Mutually recursive with guess_works.
     // None means cancelled, never a proof of failure and never memoized.
-    fn can_solve(&self, candidates: &[usize], depth: usize, stop: &AtomicBool) -> Option<bool> {
+    fn can_solve(&self, candidates: &[WordIndex], depth: usize, stop: &AtomicBool) -> Option<bool> {
         if stop.load(Ordering::Relaxed) {
             return None;
         }
@@ -350,7 +371,7 @@ impl Search {
 
         let child_capacity = capacity(depth - 1);
         let mut ranked = Vec::new();
-        for guess in 0..self.words.len() {
+        for guess in (0..self.words.len()).map(WordIndex) {
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
