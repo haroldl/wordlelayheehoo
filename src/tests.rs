@@ -715,3 +715,37 @@ fn decision_tree_json_preserves_guesses_feedback_and_solved_leaves() {
     let mut full: &mut [u8] = &mut [];
     assert_eq!(tree.write_json(&mut full).unwrap_err().kind(), std::io::ErrorKind::WriteZero);
 }
+
+#[test]
+fn sample_percentage_arguments_are_validated() {
+    assert_eq!(super::Args::try_parse_from(["wordlelayheehoo"]).unwrap().sample_percent, 100.0);
+    for value in ["0.01", "10", "99.5", "100"] {
+        let args = super::Args::try_parse_from(["wordlelayheehoo", "--sample-percent", value]).unwrap();
+        assert_eq!(args.sample_percent, value.parse::<f64>().unwrap());
+    }
+    for value in ["0", "-1", "100.1", "NaN", "inf", "abc"] {
+        assert!(super::Args::try_parse_from(["wordlelayheehoo", "--sample-percent", value]).is_err());
+    }
+    assert!(super::Args::try_parse_from(["wordlelayheehoo", "--sample-percent"]).is_err());
+}
+
+#[test]
+fn sampling_preserves_full_dictionary_and_selects_without_replacement() {
+    use rand::SeedableRng;
+    let words: Vec<_> = ["apple", "arose", "unlit", "belle", "boost", "crane", "slate"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
+    assert_eq!(super::sampling::sample_words(&words, 100.0, &mut rng), words);
+    assert!(super::sampling::sample_words(&[], 10.0, &mut rng).is_empty());
+    assert_eq!(super::sampling::sample_words(&words, 0.001, &mut rng).len(), 1);
+    let sample = super::sampling::sample_words(&words, 30.0, &mut rng);
+    assert_eq!(sample.len(), 3); // ceil(7 * .3)
+    assert!(sample.iter().all(|word| words.contains(word)));
+    assert_eq!(sample.iter().collect::<std::collections::HashSet<_>>().len(), sample.len());
+    let mut repeated_rng = rand::rngs::SmallRng::seed_from_u64(42);
+    let mut original_rng = rand::rngs::SmallRng::seed_from_u64(42);
+    assert_eq!(
+        super::sampling::sample_words(&words, 50.0, &mut repeated_rng),
+        super::sampling::sample_words(&words, 50.0, &mut original_rng),
+    );
+}

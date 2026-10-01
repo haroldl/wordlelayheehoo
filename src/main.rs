@@ -4,6 +4,7 @@ mod game_state;
 mod solver;
 mod words;
 mod tree_output;
+mod sampling;
 
 pub use solver::DecisionTree;
 
@@ -34,6 +35,11 @@ struct Args {
     )]
     workers: NonZeroUsize,
 
+    /// Random percentage of WORDS used for both guesses and targets (0 < P <= 100)
+    #[arg(long, value_name = "PERCENT", default_value = "100",
+        value_parser = sampling::parse_percent)]
+    sample_percent: f64,
+
     /// Write the winning decision tree as JSON (replaces an existing file)
     #[arg(short = 'o', long, value_name = "FILE")]
     output: Option<std::path::PathBuf>,
@@ -46,10 +52,16 @@ fn main() -> std::io::Result<()> {
 
     println!("Loaded {} five-letter words.", WORDS.len());
     // Let the solver choose every guess, including the opening word.
-    let state = GameState::new();
+    use rand::SeedableRng;
+    use std::hash::BuildHasher;
+    // RandomState supplies a fresh randomized seed without an extra OS-RNG dependency.
+    let seed = std::collections::hash_map::RandomState::new().hash_one(());
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+    let words = sampling::sample_words(WORDS, args.sample_percent, &mut rng);
+    println!("Using {} words ({}%) as both guesses and targets.", words.len(), args.sample_percent);
     println!("Searching from an empty game state with a {MAX_GUESSES}-guess budget.");
 
-    match state.decision_tree_with_workers(workers) {
+    match solver::MinimaxSolver::new(workers).decision_tree(&words, &words, MAX_GUESSES) {
         Some(tree) => {
             println!("Found strategy: worst case {} total guesses.", tree.worst_case_guesses());
             println!("Opening word: {}.", tree.guess().unwrap().as_str());
@@ -67,7 +79,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         None => println!(
-            "No strategy guarantees solving every target within {MAX_GUESSES} total guesses."
+            "No strategy guarantees solving every selected target within {MAX_GUESSES} total guesses."
         ),
     }
     Ok(())
