@@ -2,6 +2,34 @@ use clap::Parser;
 use super::{LetterResult, MAX_GUESSES, Result, Word, WORDS};
 use LetterResult::{Gold, Green, Grey};
 
+// Fixed vocabulary for solver tests; independent of the production WORD.LST.
+// Includes several words that match apple after the arose/unlit opening.
+const TEST_WORDS: [&str; 136] = [
+    "apple", "ample", "amble", "addle", "arose", "unlit",
+    "about", "above", "abuse", "actor", "acute", "admit",
+    "adopt", "adult", "after", "again", "agent", "agree",
+    "ahead", "alarm", "album", "alert", "alike", "alive",
+    "allow", "alone", "along", "alter", "among", "anger",
+    "angle", "angry", "apart", "arena", "argue", "arise",
+    "array", "aside", "asset", "audio", "audit", "avoid",
+    "awake", "award", "aware", "badly", "baker", "bases",
+    "basic", "basis", "beach", "began", "begin", "begun",
+    "being", "below", "bench", "billy", "birth", "black",
+    "blame", "blind", "block", "blood", "board", "boost",
+    "booth", "bound", "brain", "brand", "bread", "break",
+    "breed", "brief", "bring", "broad", "broke", "brown",
+    "build", "built", "buyer", "cable", "carry", "catch",
+    "cause", "chain", "chair", "chart", "chase", "cheap",
+    "check", "chest", "chief", "child", "china", "chose",
+    "civil", "claim", "class", "clean", "clear", "click",
+    "clock", "close", "coach", "coast", "could", "count",
+    "court", "cover", "craft", "crash", "cream", "crime",
+    "cross", "crowd", "crown", "curve", "cycle", "daily",
+    "dance", "dealt", "death", "debut", "delay", "depth",
+    "doing", "doubt", "dozen", "draft", "drama", "drawn",
+    "dream", "dress", "drill", "drink",
+];
+
 #[test]
 fn normalizes_case_and_borrows_letters() {
     let word = Word::new("AbCdE").unwrap();
@@ -476,15 +504,16 @@ fn feedback_occupies_one_byte() {
 }
 
 #[test]
-fn decision_tree_solves_dictionary_candidates_after_an_opening() {
+fn decision_tree_solves_test_candidates_after_an_opening() {
+    let words: Vec<_> = TEST_WORDS.iter().map(|word| Word::new(word).unwrap()).collect();
     let target = Word::new("apple").unwrap();
     let opening = [Word::new("arose").unwrap(), Word::new("unlit").unwrap()];
-    let candidates: Vec<_> = WORDS.iter().copied().filter(|&candidate| {
+    let candidates: Vec<_> = words.iter().copied().filter(|&candidate| {
         opening.iter().all(|&guess| {
             Result::from_guess(guess, candidate) == Result::from_guess(guess, target)
         })
     }).collect();
-    let allowed: Vec<_> = WORDS.iter().copied()
+    let allowed: Vec<_> = words.iter().copied()
         .filter(|word| !opening.contains(word)).collect();
     assert!(candidates.contains(&target));
     assert!(candidates.len() > 1);
