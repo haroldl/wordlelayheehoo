@@ -139,6 +139,21 @@ impl MinimaxSolver {
         table
     }
 
+    /// Counts populated and allocated feedback cells across the shared table.
+    /// Call after a search completes for a stable count, including tree reconstruction.
+    /// Reused tables include cells populated by earlier searches. Scanning here
+    /// avoids adding a counter or synchronization to the search's hot path.
+    pub(crate) fn feedback_cache_usage(&self) -> (usize, usize) {
+        let feedback = self.feedback.lock().unwrap().clone();
+        match feedback {
+            Some(table) => {
+                let populated = table.patterns.iter().filter(|cell| cell.load().is_some()).count();
+                (populated, table.patterns.len())
+            }
+            None => (0, 0),
+        }
+    }
+
     /// Returns the actual worst-case length of the first strategy found.
     /// This need not be the minimum achievable length.
     pub fn strategy_guesses(

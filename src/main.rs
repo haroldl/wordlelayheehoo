@@ -79,7 +79,12 @@ fn main() -> std::io::Result<()> {
         let words = sampling::sample_words(WORDS, args.sample_percent, &mut rng);
         println!("Using {} words ({}%) as both guesses and targets.", words.len(), args.sample_percent);
         println!("Searching from an empty game state with a {MAX_GUESSES}-guess budget.");
-        solver::MinimaxSolver::new(workers).decision_tree(&words, &words, MAX_GUESSES)
+        let solver = solver::MinimaxSolver::new(workers);
+        let tree = solver.decision_tree(&words, &words, MAX_GUESSES);
+        let (populated, total) = solver.feedback_cache_usage();
+        let percent = if total == 0 { 0.0 } else { 100.0 * populated as f64 / total as f64 };
+        println!("Feedback cache: {populated}/{total} cells populated ({percent:.2}%).");
+        tree
     };
 
     match solution {

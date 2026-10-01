@@ -111,3 +111,30 @@ fn search_uses_cached_indices_when_allowed_words_are_narrowed() {
     assert_eq!(tree.worst_case_guesses(), 2);
     assert!(Arc::ptr_eq(&table, &pool.feedback_table(allowed)));
 }
+
+#[test]
+fn feedback_cache_usage_counts_unique_cells_including_tree_reconstruction() {
+    let solver = MinimaxSolver::new(1);
+    assert_eq!(solver.feedback_cache_usage(), (0, 0));
+    let words = cache_words();
+    let table = solver.feedback_table(&words);
+    let total = table.words.len() * table.words.len();
+    assert_eq!(solver.feedback_cache_usage(), (0, total));
+    table.pattern(0, 0);
+    table.pattern(0, 0);
+    assert_eq!(solver.feedback_cache_usage(), (1, total));
+    table.pattern(0, 1);
+    assert_eq!(solver.feedback_cache_usage(), (2, total));
+    for guess in 0..table.words.len() {
+        for target in 0..table.words.len() {
+            table.pattern(guess, target);
+        }
+    }
+    assert_eq!(solver.feedback_cache_usage(), (total, total));
+
+    let solver = MinimaxSolver::new(1);
+    let target = crate::Word::new("apple").unwrap();
+    // A single target bypasses the worker search; reconstruction still fills its cell.
+    assert!(solver.decision_tree(&[target], &[target], 1).is_some());
+    assert_eq!(solver.feedback_cache_usage(), (1, 1));
+}
