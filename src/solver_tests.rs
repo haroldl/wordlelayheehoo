@@ -34,7 +34,7 @@ fn cache_words() -> Vec<crate::Word> {
 
 #[test]
 fn cached_feedback_matches_scoring_for_every_pair() {
-    let pool = MinimaxSolver::new(1);
+    let mut pool = MinimaxSolver::new(1);
     let words = cache_words();
     let table = pool.feedback_table(&words);
     for (guess_id, &guess) in table.words.iter().enumerate() {
@@ -42,15 +42,14 @@ fn cached_feedback_matches_scoring_for_every_pair() {
             let expected = crate::Result::from_guess(guess, target);
             assert_eq!(table.pattern(guess_id, target_id), expected);
             assert_eq!(table.pattern(guess_id, target_id), expected);
-            assert_eq!(table.patterns[guess_id * table.words.len() + target_id]
-                .load(), Some(expected));
+            assert_eq!(table.patterns[guess_id * table.words.len() + target_id], expected);
         }
     }
 }
 
 #[test]
 fn feedback_table_is_reused_across_searches_and_allowed_subsets() {
-    let pool = MinimaxSolver::new(1);
+    let mut pool = MinimaxSolver::new(1);
     let words = cache_words();
     let table = pool.feedback_table(&words);
     let first = table.pattern(0, 1);
@@ -72,8 +71,8 @@ fn feedback_table_is_reused_across_searches_and_allowed_subsets() {
 }
 
 #[test]
-fn workers_share_cold_feedback_cells_safely() {
-    let pool = MinimaxSolver::new(10);
+fn workers_share_precomputed_feedback_safely() {
+    let mut pool = MinimaxSolver::new(10);
     let table = pool.feedback_table(&cache_words());
     let barrier = Arc::new(Barrier::new(10));
     let (sender, receiver) = mpsc::channel();
@@ -100,7 +99,7 @@ fn workers_share_cold_feedback_cells_safely() {
 
 #[test]
 fn search_uses_cached_indices_when_allowed_words_are_narrowed() {
-    let pool = MinimaxSolver::new(10);
+    let mut pool = MinimaxSolver::new(10);
     let vocabulary: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd", "zzzzz"]
         .into_iter().map(|word| crate::Word::new(word).unwrap()).collect();
     let table = pool.feedback_table(&vocabulary);
@@ -113,28 +112,14 @@ fn search_uses_cached_indices_when_allowed_words_are_narrowed() {
 }
 
 #[test]
-fn feedback_cache_usage_counts_unique_cells_including_tree_reconstruction() {
-    let solver = MinimaxSolver::new(1);
-    assert_eq!(solver.feedback_cache_usage(), (0, 0));
-    let words = cache_words();
-    let table = solver.feedback_table(&words);
-    let total = table.words.len() * table.words.len();
-    assert_eq!(solver.feedback_cache_usage(), (0, total));
-    table.pattern(0, 0);
-    table.pattern(0, 0);
-    assert_eq!(solver.feedback_cache_usage(), (1, total));
-    table.pattern(0, 1);
-    assert_eq!(solver.feedback_cache_usage(), (2, total));
-    for guess in 0..table.words.len() {
-        for target in 0..table.words.len() {
-            table.pattern(guess, target);
-        }
-    }
-    assert_eq!(solver.feedback_cache_usage(), (total, total));
-
-    let solver = MinimaxSolver::new(1);
-    let target = crate::Word::new("apple").unwrap();
-    // A single target bypasses the worker search; reconstruction still fills its cell.
-    assert!(solver.decision_tree(&[target], &[target], 1).is_some());
-    assert_eq!(solver.feedback_cache_usage(), (1, 1));
+fn feedback_table_is_complete_before_any_lookup() {
+    let mut pool = MinimaxSolver::new(1);
+    let table = pool.feedback_table(&cache_words());
+    let expected: Vec<_> = table.words.iter().flat_map(|&guess| {
+        table.words.iter().map(move |&target| crate::Result::from_guess(guess, target))
+    }).collect();
+    assert_eq!(table.patterns, expected);
+    assert_eq!(table.patterns.len(), table.words.len().pow(2));
+    let empty = super::FeedbackTable::new(Vec::new());
+    assert!(empty.patterns.is_empty());
 }

@@ -117,10 +117,10 @@ impl GameState {
 
     /// Runs minimax using a fixed pool of workers; workers must be positive.
     pub fn minimax_guesses_with_workers(&self, workers: usize) -> Option<usize> {
-        self.minimax_guesses_using(&solver::MinimaxSolver::new(workers))
+        self.minimax_guesses_using(&mut solver::MinimaxSolver::new(workers))
     }
 
-    fn minimax_guesses_using(&self, solver: &solver::MinimaxSolver) -> Option<usize> {
+    fn minimax_guesses_using(&self, solver: &mut solver::MinimaxSolver) -> Option<usize> {
         let candidates: Vec<_> = self.possible_solutions().collect();
         if candidates.is_empty() {
             return None;
@@ -190,9 +190,9 @@ pub fn possible_states_after_guesses(guesses: &[Word]) -> HashSet<GameState> {
 /// Reuses one pool across states; queued work is inside each minimax search.
 #[cfg(test)]
 pub(crate) fn max_minimax_guesses(game_states: &HashSet<GameState>, workers: usize) -> Option<usize> {
-    let solver = solver::MinimaxSolver::new(workers);
+    let mut solver = solver::MinimaxSolver::new(workers);
     game_states.iter()
-        .map(|state| state.minimax_guesses_using(&solver))
+        .map(|state| state.minimax_guesses_using(&mut solver))
         .try_fold(0usize, |worst, next| next.map(|count| worst.max(count)))
 }
 

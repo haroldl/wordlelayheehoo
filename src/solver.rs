@@ -13,34 +13,31 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-use crate::words::{AtomicResult, Result, Word};
+use crate::words::{Result, Word};
 
 const GUESSES_PER_JOB: usize = 16;
 
-/// Dense, lazily filled feedback table in a stable sorted word order.
-/// Each pair occupies one byte and starts with no cached feedback.
-/// Atomic cells let workers share results without locking during search.
-/// Two workers may score the same cold cell; both publish the same value.
+/// Dense, precomputed feedback table in a stable sorted word order.
+/// Each pair occupies one byte. Workers share the completed table read-only.
 struct FeedbackTable {
     words: Vec<Word>,
-    patterns: Vec<AtomicResult>,
+    patterns: Vec<Result>,
 }
 
 impl FeedbackTable {
     fn new(words: Vec<Word>) -> Self {
         let cells = words.len().checked_mul(words.len()).expect("feedback table too large");
-        let patterns = (0..cells).map(|_| AtomicResult::new()).collect();
+        let mut patterns = Vec::with_capacity(cells);
+        for &guess in &words {
+            for &target in &words {
+                patterns.push(Result::from_guess(guess, target));
+            }
+        }
         Self { words, patterns }
     }
 
     fn pattern(&self, guess: usize, target: usize) -> Result {
-        let cell = &self.patterns[guess * self.words.len() + target];
-        if let Some(cached) = cell.load() {
-            return cached;
-        }
-        let pattern = Result::from_guess(self.words[guess], self.words[target]);
-        cell.store(pattern);
-        pattern
+        self.patterns[guess * self.words.len() + target]
     }
 }
 
@@ -89,7 +86,7 @@ impl DecisionTree {
 pub struct MinimaxSolver {
     sender: Option<mpsc::Sender<Job>>,
     workers: Vec<JoinHandle<()>>,
-    feedback: Mutex<Option<Arc<FeedbackTable>>>,
+    feedback: Option<Arc<FeedbackTable>>,
 }
 
 impl MinimaxSolver {
@@ -114,50 +111,34 @@ impl MinimaxSolver {
                     .expect("failed to start minimax worker")
             })
             .collect();
-        Self { sender: Some(sender), workers, feedback: Mutex::new(None) }
+        Self { sender: Some(sender), workers, feedback: None }
     }
 
     /// Reuse the table when the allowed words are reordered or narrowed.
     /// An expanded vocabulary starts a new table over the union. Existing
     /// searches retain their old table through Arc; subsequent searches share
     /// the expanded table. Normal searches with a fixed opening reuse one table.
-    fn feedback_table(&self, words: &[Word]) -> Arc<FeedbackTable> {
-        let mut cached = self.feedback.lock().unwrap();
-        if let Some(table) = cached.as_ref() {
+    fn feedback_table(&mut self, words: &[Word]) -> Arc<FeedbackTable> {
+        if let Some(table) = self.feedback.as_ref() {
             if words.iter().all(|word| table.words.binary_search(word).is_ok()) {
                 return Arc::clone(table);
             }
         }
         let mut vocabulary = words.to_vec();
-        if let Some(table) = cached.as_ref() {
+        if let Some(table) = self.feedback.as_ref() {
             vocabulary.extend_from_slice(&table.words);
         }
         vocabulary.sort_unstable();
         vocabulary.dedup();
         let table = Arc::new(FeedbackTable::new(vocabulary));
-        *cached = Some(Arc::clone(&table));
+        self.feedback = Some(Arc::clone(&table));
         table
-    }
-
-    /// Counts populated and allocated feedback cells across the shared table.
-    /// Call after a search completes for a stable count, including tree reconstruction.
-    /// Reused tables include cells populated by earlier searches. Scanning here
-    /// avoids adding a counter or synchronization to the search's hot path.
-    pub(crate) fn feedback_cache_usage(&self) -> (usize, usize) {
-        let feedback = self.feedback.lock().unwrap().clone();
-        match feedback {
-            Some(table) => {
-                let populated = table.patterns.iter().filter(|cell| cell.load().is_some()).count();
-                (populated, table.patterns.len())
-            }
-            None => (0, 0),
-        }
     }
 
     /// Returns the actual worst-case length of the first strategy found.
     /// This need not be the minimum achievable length.
     pub fn strategy_guesses(
-        &self,
+        &mut self,
         allowed: &[Word],
         candidates: &[Word],
         max_depth: usize,
@@ -170,7 +151,7 @@ impl MinimaxSolver {
     /// Accepts the first success; worker schedules may select different strategies.
     /// Does not search smaller budgets to minimize the strategy's length.
     pub fn decision_tree(
-        &self,
+        &mut self,
         allowed: &[Word],
         candidates: &[Word],
         max_depth: usize,
@@ -180,7 +161,7 @@ impl MinimaxSolver {
     }
 
     fn prove(
-        &self,
+        &mut self,
         allowed: &[Word],
         candidates: &[Word],
         max_depth: usize,

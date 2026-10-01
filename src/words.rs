@@ -123,28 +123,6 @@ impl Result {
     }
 }
 
-/// One-byte atomic cache cell, initially empty.
-/// The sentinel stays private so callers only handle valid feedback.
-pub(crate) struct AtomicResult(std::sync::atomic::AtomicU8);
-
-impl AtomicResult {
-    const EMPTY: u8 = u8::MAX;
-
-    pub(crate) fn new() -> Self {
-        Self(std::sync::atomic::AtomicU8::new(Self::EMPTY))
-    }
-
-    pub(crate) fn load(&self) -> Option<Result> {
-        let code = self.0.load(std::sync::atomic::Ordering::Relaxed);
-        (code != Self::EMPTY).then_some(Result(code))
-    }
-
-    pub(crate) fn store(&self, result: Result) {
-        // The byte is the entire cached value; no other data needs publishing.
-        self.0.store(result.0, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 // Before compiling this crate, Cargo runs build.rs, which reads WORD.LST,
 // keeps lines containing exactly five ASCII letters, and lowercases them.
 // It preserves file order and duplicates, then writes Rust source to

@@ -542,7 +542,7 @@ fn queued_minimax_matches_exhaustive_search_with_one_ten_and_twenty_workers() {
     let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
     for workers in [1, 10, 20] {
-        let solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers);
         for mask in 1..(1 << allowed.len()) {
             let candidates: Vec<_> = allowed.iter().enumerate()
                 .filter(|(index, _)| mask & (1 << index) != 0)
@@ -561,7 +561,7 @@ fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
     // More than 16 words forces work into multiple queue jobs.
     let words: Vec<_> = (b'a'..=b't').map(|letter| Word::new(&format!("{}zzzz", char::from(letter))).unwrap()).collect();
     for workers in [1, 10, 20] {
-        let solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers);
         assert_eq!(solver.strategy_guesses(&words, &words, 3), None);
         assert_eq!(solver.strategy_guesses(&words, &words[..1], 1), Some(1));
     }
@@ -603,7 +603,7 @@ fn decision_trees_cover_all_targets_at_the_exhaustive_optimum() {
     let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
     for workers in [1, 10, 20] {
-        let solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers);
         for mask in 1..(1 << allowed.len()) {
             let candidates: Vec<_> = allowed.iter().enumerate()
                 .filter(|(index, _)| mask & (1 << index) != 0)
@@ -624,7 +624,7 @@ fn decision_tree_includes_non_candidate_probe_and_final_correct_guess() {
     let probe = Word::new("bcddd").unwrap();
     let mut allowed = candidates.clone();
     allowed.push(probe);
-    let solver = super::solver::MinimaxSolver::new(10);
+    let mut solver = super::solver::MinimaxSolver::new(10);
     let tree = solver.decision_tree(&allowed, &candidates, 2).unwrap();
     assert_eq!(tree.guess(), Some(probe));
     assert_eq!(tree.after_result(Result::ALL_GREEN), None);
@@ -656,7 +656,7 @@ fn solver_accepts_a_longer_strategy_when_it_fits_the_budget() {
     let mut allowed = candidates.clone();
     allowed.push(Word::new("bcddd").unwrap());
     for workers in [1, 10, 20] {
-        let solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers);
         // A probe can solve in two, but sequential candidate guesses fit six.
         assert_eq!(solver.strategy_guesses(&allowed, &candidates, 2), Some(2));
         let tree = solver.decision_tree(&allowed, &candidates, MAX_GUESSES).unwrap();
@@ -826,27 +826,6 @@ fn feedback_round_trips_all_letter_patterns() {
     assert_eq!(indices, (0..Result::COUNT).collect());
     assert_eq!(Result::ALL_GREEN.to_letters(), [Green; 5]);
     assert_eq!(Result::new([Green; 5]), Result::ALL_GREEN);
-}
-
-#[test]
-fn atomic_feedback_stores_every_pattern_in_one_byte() {
-    use super::words::AtomicResult;
-    assert_eq!(std::mem::size_of::<AtomicResult>(), 1);
-    let cell = AtomicResult::new();
-    assert_eq!(cell.load(), None);
-    for a in [Grey, Gold, Green] {
-        for b in [Grey, Gold, Green] {
-            for c in [Grey, Gold, Green] {
-                for d in [Grey, Gold, Green] {
-                    for e in [Grey, Gold, Green] {
-                        let feedback = Result::new([a, b, c, d, e]);
-                        cell.store(feedback);
-                        assert_eq!(cell.load(), Some(feedback));
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[test]
