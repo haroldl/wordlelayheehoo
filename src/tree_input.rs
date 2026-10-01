@@ -29,7 +29,7 @@ fn tree(value: Value, played: &mut Vec<Word>) -> io::Result<DecisionTree> {
                 if played.contains(&word) { return Err(invalid("repeated guess on a tree path")); }
                 Ok(DecisionTree::Guess {
                     word,
-                    branches: [(Feedback::new([LetterResult::Green; 5]), DecisionTree::Solved)].into(),
+                    branches: [(Feedback::ALL_GREEN, DecisionTree::Solved)].into(),
                 })
             }
         };
@@ -49,11 +49,12 @@ fn tree(value: Value, played: &mut Vec<Word>) -> io::Result<DecisionTree> {
                 _ => return Err(invalid("feedback symbols must be _, +, or *")),
             };
         }
+        let feedback = Feedback::new(letters);
         let child = tree(next, played)?;
-        if (letters == [LetterResult::Green; 5]) != matches!(child, DecisionTree::Solved) {
+        if (feedback == Feedback::ALL_GREEN) != matches!(child, DecisionTree::Solved) {
             return Err(invalid("only all-green feedback may lead directly to solved"));
         }
-        decoded.insert(Feedback::new(letters), child);
+        decoded.insert(feedback, child);
     }
     played.pop();
     Ok(DecisionTree::Guess { word, branches: decoded })

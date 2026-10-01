@@ -56,7 +56,7 @@ struct Args {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    let strategy = if let Some(path) = &args.load_tree {
+    let solution = if let Some(path) = &args.load_tree {
         let load = || -> std::io::Result<DecisionTree> {
             DecisionTree::read_json(std::io::BufReader::new(std::fs::File::open(path)?))
         };
@@ -82,7 +82,7 @@ fn main() -> std::io::Result<()> {
         solver::MinimaxSolver::new(workers).decision_tree(&words, &words, MAX_GUESSES)
     };
 
-    match strategy {
+    match solution {
         Some(tree) => {
             println!("Strategy: worst case {} total guesses.", tree.worst_case_guesses());
             if let Some(word) = tree.guess() {
@@ -103,6 +103,7 @@ fn main() -> std::io::Result<()> {
                 println!("Saved decision tree to {}.", path.display());
             }
             if args.interactive {
+                // Walk the user through solving a Wordle puzzle using the decision tree:
                 interpret_tree(&tree)?;
             }
         }

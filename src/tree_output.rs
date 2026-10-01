@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 use serde_json::{Value, json};
-use crate::{DecisionTree, LetterResult};
+use crate::{DecisionTree, LetterResult, Result};
 
 impl DecisionTree {
     /// Writes indented JSON with sorted feedback branches and a trailing newline.
@@ -20,13 +20,13 @@ impl DecisionTree {
             Self::Solved => json!({ "solved": true }),
             Self::Guess { word, branches } => {
                 if branches.len() == 1 && branches.iter().any(|(result, next)| {
-                    result.as_slice() == [LetterResult::Green; 5]
+                    *result == Result::ALL_GREEN
                         && matches!(next, Self::Solved)
                 }) {
                     return json!({ "guess": word.as_str(), "solved": true });
                 }
                 let branches: serde_json::Map<String, Value> = branches.iter().map(|(result, next)| {
-                    let pattern: String = result.as_slice().iter().map(|letter| match letter {
+                    let pattern: String = result.to_letters().into_iter().map(|letter| match letter {
                         LetterResult::Grey => '_',
                         LetterResult::Gold => '+',
                         LetterResult::Green => '*',

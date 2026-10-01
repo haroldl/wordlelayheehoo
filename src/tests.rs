@@ -41,7 +41,7 @@ fn generated_words_match_runtime_validation() {
 
 fn assert_feedback(guess: &str, target: &str, expected: [LetterResult; 5]) {
     let result = Result::from_guess(Word::new(guess).unwrap(), Word::new(target).unwrap());
-    assert_eq!(result.as_slice(), &expected, "guess {guess}, target {target}");
+    assert_eq!(result.to_letters(), expected, "guess {guess}, target {target}");
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn game_state_equality_includes_feedback() {
     let word = Word::new("apple").unwrap();
     let mut green_state = GameState::new();
     let mut grey_state = GameState::new();
-    green_state = green_state.with_guess(word, Result::new([Green; 5])).unwrap();
+    green_state = green_state.with_guess(word, Result::ALL_GREEN).unwrap();
     grey_state = grey_state.with_guess(word, Result::new([Grey; 5])).unwrap();
 
     assert_ne!(green_state, grey_state);
@@ -142,7 +142,7 @@ fn empty_state_allows_every_dictionary_word_in_order() {
 fn all_green_feedback_leaves_only_the_guessed_word() {
     let word = Word::new("apple").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(word, Result::new([Green; 5])).unwrap();
+    state = state.with_guess(word, Result::ALL_GREEN).unwrap();
     assert_eq!(state.possible_solutions().collect::<Vec<_>>(), vec![word]);
 }
 
@@ -171,7 +171,7 @@ fn possible_solutions_respect_duplicate_letters_and_additional_guesses() {
 fn contradictory_feedback_has_no_possible_solution() {
     let word = Word::new("apple").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(word, Result::new([Green; 5])).unwrap();
+    state = state.with_guess(word, Result::ALL_GREEN).unwrap();
     state = state.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
     assert_eq!(state.possible_solutions().next(), None);
 }
@@ -297,7 +297,7 @@ fn repeating_a_guess_has_no_successors() {
 fn make_guess_on_contradictory_state_has_no_outcomes() {
     let word = Word::new("apple").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(word, Result::new([Green; 5])).unwrap();
+    state = state.with_guess(word, Result::ALL_GREEN).unwrap();
     state = state.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
     assert!(state.make_guess(Word::new("arose").unwrap()).is_empty());
 }
@@ -307,7 +307,7 @@ fn make_guess_after_a_win_scores_against_the_known_target() {
     let target = Word::new("apple").unwrap();
     let guess = Word::new("arose").unwrap();
     let mut state = GameState::new();
-    state = state.with_guess(target, Result::new([Green; 5])).unwrap();
+    state = state.with_guess(target, Result::ALL_GREEN).unwrap();
     let next = state.make_guess(guess);
     let mut expected = state.clone();
     expected = expected.with_guess(guess, Result::from_guess(guess, target)).unwrap();
@@ -322,7 +322,7 @@ fn adding_feedback_preserves_states_already_in_a_hash_set() {
     let original = GameState::new().with_guess(first, Result::from_guess(first, target)).unwrap();
     let mut states = std::collections::HashSet::from([original.clone()]);
     let stored = states.get(&original).unwrap();
-    let extended = stored.with_guess(target, Result::new([Green; 5])).unwrap();
+    let extended = stored.with_guess(target, Result::ALL_GREEN).unwrap();
 
     assert_eq!(original.guesses().len(), 1);
     assert!(!original.is_solved());
@@ -352,7 +352,7 @@ fn game_is_lost_at_or_beyond_the_guess_limit() {
 #[test]
 fn solved_game_is_not_lost_at_or_beyond_the_guess_limit() {
     let target = Word::new("apple").unwrap();
-    let mut state = GameState::new().with_guess(target, Result::new([Green; 5])).unwrap();
+    let mut state = GameState::new().with_guess(target, Result::ALL_GREEN).unwrap();
     for guess in WORDS.iter().copied().filter(|&word| word != target)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter().take(MAX_GUESSES)
@@ -434,7 +434,7 @@ fn minimax_matches_exhaustive_search_on_every_small_candidate_subset() {
 #[test]
 fn minimax_game_state_handles_solved_inconsistent_and_exhausted_states() {
     let target = Word::new("apple").unwrap();
-    let solved = GameState::new().with_guess(target, Result::new([Green; 5])).unwrap();
+    let solved = GameState::new().with_guess(target, Result::ALL_GREEN).unwrap();
     assert_eq!(solved.minimax_guesses(), Some(0));
     let inconsistent = solved.with_guess(
         Word::new("ample").unwrap(), Result::new([Grey; 5])
@@ -485,7 +485,7 @@ fn minimax_searches_multiple_levels_when_guesses_only_eliminate_one_target() {
 #[test]
 fn parallel_minimax_respects_budget_and_preserves_failure() {
     let target = Word::new("apple").unwrap();
-    let solved = GameState::new().with_guess(target, Result::new([Green; 5])).unwrap();
+    let solved = GameState::new().with_guess(target, Result::ALL_GREEN).unwrap();
     let opening = ["arose", "unlit"].into_iter().fold(GameState::new(), |state, text| {
         let guess = Word::new(text).unwrap();
         state.with_guess(guess, Result::from_guess(guess, target)).unwrap()
@@ -589,7 +589,7 @@ fn verify_decision_tree(
     assert_eq!(tree.guess(), Some(*word));
     for (result, targets) in groups {
         let next = tree.after_result(result).expect("missing reachable feedback branch");
-        if result == Result::new([Green; 5]) {
+        if result == Result::ALL_GREEN {
             assert_eq!(targets, vec![*word]);
             assert_eq!(next, &super::DecisionTree::Solved);
         } else {
@@ -627,7 +627,7 @@ fn decision_tree_includes_non_candidate_probe_and_final_correct_guess() {
     let solver = super::solver::MinimaxSolver::new(10);
     let tree = solver.decision_tree(&allowed, &candidates, 2).unwrap();
     assert_eq!(tree.guess(), Some(probe));
-    assert_eq!(tree.after_result(Result::new([Green; 5])), None);
+    assert_eq!(tree.after_result(Result::ALL_GREEN), None);
     verify_decision_tree(&tree, &allowed, &candidates, &std::collections::HashSet::new(), 2);
 }
 
@@ -643,7 +643,7 @@ fn decision_tree_for_game_state_preserves_history_and_budget() {
     let played = state.guesses().iter().map(|&(word, _)| word).collect();
     let candidates: Vec<_> = state.possible_solutions().collect();
     verify_decision_tree(&tree, WORDS, &candidates, &played, MAX_GUESSES - state.guesses().len());
-    let solved = state.with_guess(target, Result::new([Green; 5])).unwrap();
+    let solved = state.with_guess(target, Result::ALL_GREEN).unwrap();
     assert_eq!(solved.decision_tree(), Some(super::DecisionTree::Solved));
     let inconsistent = solved.with_guess(Word::new("ample").unwrap(), Result::new([Grey; 5])).unwrap();
     assert_eq!(inconsistent.decision_tree(), None);
@@ -687,10 +687,10 @@ fn decision_tree_json_preserves_guesses_feedback_and_solved_leaves() {
             (Result::new([Grey, Grey, Gold, Green, Grey]), DecisionTree::Guess {
                 word: Word::new("boost").unwrap(),
                 branches: std::collections::HashMap::from([
-                    (Result::new([Green; 5]), DecisionTree::Solved),
+                    (Result::ALL_GREEN, DecisionTree::Solved),
                 ]),
             }),
-            (Result::new([Green; 5]), DecisionTree::Solved),
+            (Result::ALL_GREEN, DecisionTree::Solved),
         ]),
     };
     let mut json = Vec::new();
@@ -805,30 +805,52 @@ fn load_tree_cli_accepts_output_and_rejects_search_options() {
 }
 
 #[test]
-fn feedback_byte_encoding_preserves_digit_order() {
-    for (letters, code) in [
-        ([Grey; 5], 0),
-        ([Green; 5], 242),
-        ([Gold, Grey, Grey, Grey, Grey], 81),
-        ([Grey, Grey, Grey, Grey, Gold], 1),
-        ([Green, Gold, Grey, Green, Gold], 196),
-    ] {
-        let feedback = Result::new(letters);
-        assert_eq!(feedback.to_u8(), code);
-        assert_eq!(Result::from_u8(code), Some(feedback));
+fn feedback_round_trips_all_letter_patterns() {
+    let mut patterns = std::collections::HashSet::new();
+    for a in [Grey, Gold, Green] {
+        for b in [Grey, Gold, Green] {
+            for c in [Grey, Gold, Green] {
+                for d in [Grey, Gold, Green] {
+                    for e in [Grey, Gold, Green] {
+                        let letters = [a, b, c, d, e];
+                        let feedback = Result::new(letters);
+                        assert_eq!(feedback.to_letters(), letters);
+                        assert!(patterns.insert(feedback));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(patterns.len(), Result::COUNT);
+    let indices: std::collections::HashSet<_> = patterns.iter().map(|r| r.index()).collect();
+    assert_eq!(indices, (0..Result::COUNT).collect());
+    assert_eq!(Result::ALL_GREEN.to_letters(), [Green; 5]);
+    assert_eq!(Result::new([Green; 5]), Result::ALL_GREEN);
+}
+
+#[test]
+fn atomic_feedback_stores_every_pattern_in_one_byte() {
+    use super::words::AtomicResult;
+    assert_eq!(std::mem::size_of::<AtomicResult>(), 1);
+    let cell = AtomicResult::new();
+    assert_eq!(cell.load(), None);
+    for a in [Grey, Gold, Green] {
+        for b in [Grey, Gold, Green] {
+            for c in [Grey, Gold, Green] {
+                for d in [Grey, Gold, Green] {
+                    for e in [Grey, Gold, Green] {
+                        let feedback = Result::new([a, b, c, d, e]);
+                        cell.store(feedback);
+                        assert_eq!(cell.load(), Some(feedback));
+                    }
+                }
+            }
+        }
     }
 }
 
 #[test]
-fn feedback_byte_encoding_round_trips_all_patterns_and_rejects_invalid_bytes() {
-    let mut patterns = std::collections::HashSet::new();
-    for code in 0..=242 {
-        let feedback = Result::from_u8(code).unwrap();
-        assert_eq!(feedback.to_u8(), code);
-        assert!(patterns.insert(feedback));
-    }
-    assert_eq!(patterns.len(), 243);
-    for code in 243..=u8::MAX {
-        assert_eq!(Result::from_u8(code), None);
-    }
+fn feedback_occupies_one_byte() {
+    assert_eq!(std::mem::size_of::<Result>(), 1);
+    assert_eq!(std::mem::size_of::<[Result; 243]>(), 243);
 }

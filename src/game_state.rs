@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 use crate::{DEFAULT_SOLVER_WORKERS, MAX_GUESSES, solver};
-use crate::words::{LetterResult, Result, WORDS, Word};
+use crate::words::{Result, WORDS, Word};
 
 /// An immutable, unordered set of guesses and their observed feedback.
 /// Adding observations returns a new state, leaving the original unchanged.
@@ -23,10 +23,7 @@ impl Hash for GameState {
         let mut pairs: Vec<_> = self
             .guesses
             .iter()
-            .map(|&(word, result)| {
-                let letters: [u8; 5] = std::array::from_fn(|i| result.as_slice()[i] as u8);
-                (word, letters)
-            })
+            .copied()
             .collect();
         pairs.sort_unstable();
         pairs.hash(state);
@@ -84,7 +81,7 @@ impl GameState {
     pub fn is_solved(&self) -> bool {
         self.guesses
             .iter()
-            .any(|(_, result)| result.as_slice() == [LetterResult::Green; 5])
+            .any(|(_, result)| *result == Result::ALL_GREEN)
     }
 
     /// Returns true when the guess limit has been reached without a correct guess.

@@ -53,29 +53,33 @@ pub enum LetterResult {
 }
 
 /// Feedback for the five letters of a guess, in positional order.
-/// Stored inline as five bytes without heap allocation.
+/// Stored as one byte containing five base-3 digits (0..=242).
 /// This game type is separate from Rust's std::result::Result<T, E>.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Result([LetterResult; 5]);
+pub struct Result(u8);
 
 impl Result {
+    /// Feedback for a correct guess.
+    pub const ALL_GREEN: Self = Self(242);
+
+    /// Number of distinct five-letter feedback patterns.
+    pub const COUNT: usize = 243;
+
     /// Creates feedback with exactly one result per letter.
-    pub fn new(letters: [LetterResult; 5]) -> Self {
-        Self(letters)
-    }
-
-    /// Encodes five base-3 digits as a byte in 0..=242.
     /// Grey = 0, Gold = 1, Green = 2; the first letter is most significant.
-    pub fn to_u8(self) -> u8 {
-        self.0.iter().fold(0u8, |code, &letter| code * 3 + letter as u8)
+    pub fn new(letters: [LetterResult; 5]) -> Self {
+        Self(letters.iter().fold(0u8, |code, &letter| code * 3 + letter as u8))
     }
 
-    /// Restores feedback from its base-3 encoding; rejects bytes above 242.
-    pub fn from_u8(mut code: u8) -> Option<Self> {
-        if code > 242 {
-            return None;
-        }
+    /// Dense index for tables grouped by feedback.
+    pub(crate) fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    /// Decodes the results into an array in guess order without heap allocation.
+    pub fn to_letters(self) -> [LetterResult; 5] {
+        let mut code = self.0;
         let mut letters = [LetterResult::Grey; 5];
         for letter in letters.iter_mut().rev() {
             *letter = match code % 3 {
@@ -85,7 +89,7 @@ impl Result {
             };
             code /= 3;
         }
-        Some(Self(letters))
+        letters
     }
 
     /// Scores a guess against a target using Wordle's duplicate-letter rules.
@@ -115,12 +119,29 @@ impl Result {
             }
         }
 
-        Self(letters)
+        Self::new(letters)
+    }
+}
+
+/// One-byte atomic cache cell, initially empty.
+/// The sentinel stays private so callers only handle valid feedback.
+pub(crate) struct AtomicResult(std::sync::atomic::AtomicU8);
+
+impl AtomicResult {
+    const EMPTY: u8 = u8::MAX;
+
+    pub(crate) fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(Self::EMPTY))
     }
 
-    /// Borrows the results in guess order for indexing or iteration.
-    pub fn as_slice(&self) -> &[LetterResult] {
-        &self.0
+    pub(crate) fn load(&self) -> Option<Result> {
+        let code = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        (code != Self::EMPTY).then_some(Result(code))
+    }
+
+    pub(crate) fn store(&self, result: Result) {
+        // The byte is the entire cached value; no other data needs publishing.
+        self.0.store(result.0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

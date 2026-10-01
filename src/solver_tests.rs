@@ -39,12 +39,11 @@ fn cached_feedback_matches_scoring_for_every_pair() {
     let table = pool.feedback_table(&words);
     for (guess_id, &guess) in table.words.iter().enumerate() {
         for (target_id, &target) in table.words.iter().enumerate() {
-            let expected = crate::Result::from_guess(guess, target).as_slice().iter()
-                .fold(0usize, |code, &letter| code * 3 + letter as usize);
+            let expected = crate::Result::from_guess(guess, target);
             assert_eq!(table.pattern(guess_id, target_id), expected);
             assert_eq!(table.pattern(guess_id, target_id), expected);
-            assert_eq!(usize::from(table.patterns[guess_id * table.words.len() + target_id]
-                .load(super::Ordering::Relaxed)), expected);
+            assert_eq!(table.patterns[guess_id * table.words.len() + target_id]
+                .load(), Some(expected));
         }
     }
 }

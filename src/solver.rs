@@ -10,42 +10,37 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-use crate::words::{Result, Word};
+use crate::words::{AtomicResult, Result, Word};
 
-const PATTERNS: usize = 243;
-const ALL_GREEN: usize = PATTERNS - 1;
 const GUESSES_PER_JOB: usize = 16;
-const UNCOMPUTED: u8 = u8::MAX;
 
 /// Dense, lazily filled feedback table in a stable sorted word order.
-/// Each pair occupies one byte: 0..=242 is feedback, 255 means uncomputed.
+/// Each pair occupies one byte and starts with no cached feedback.
 /// Atomic cells let workers share results without locking during search.
 /// Two workers may score the same cold cell; both publish the same value.
 struct FeedbackTable {
     words: Vec<Word>,
-    patterns: Vec<AtomicU8>,
+    patterns: Vec<AtomicResult>,
 }
 
 impl FeedbackTable {
     fn new(words: Vec<Word>) -> Self {
         let cells = words.len().checked_mul(words.len()).expect("feedback table too large");
-        let patterns = (0..cells).map(|_| AtomicU8::new(UNCOMPUTED)).collect();
+        let patterns = (0..cells).map(|_| AtomicResult::new()).collect();
         Self { words, patterns }
     }
 
-    fn pattern(&self, guess: usize, target: usize) -> usize {
+    fn pattern(&self, guess: usize, target: usize) -> Result {
         let cell = &self.patterns[guess * self.words.len() + target];
-        let cached = cell.load(Ordering::Relaxed);
-        if cached != UNCOMPUTED {
-            return usize::from(cached);
+        if let Some(cached) = cell.load() {
+            return cached;
         }
-        let pattern = Result::from_guess(self.words[guess], self.words[target]).to_u8();
-        // This byte is the whole cached value; no other data needs publishing.
-        cell.store(pattern, Ordering::Relaxed);
-        usize::from(pattern)
+        let pattern = Result::from_guess(self.words[guess], self.words[target]);
+        cell.store(pattern);
+        pattern
     }
 }
 
@@ -295,11 +290,11 @@ impl Search {
         let word = self.words[guess];
         let mut groups: HashMap<Result, Vec<usize>> = HashMap::new();
         for &target in candidates {
-            groups.entry(Result::from_guess(word, self.words[target]))
+            groups.entry(self.pattern(guess, target))
                 .or_default().push(target);
         }
         let branches = groups.into_iter().map(|(result, group)| {
-            let next = if group.len() == 1 && group[0] == guess {
+            let next = if result == Result::ALL_GREEN {
                 DecisionTree::Solved
             } else {
                 self.build_tree(&group, depth - 1)
@@ -309,7 +304,7 @@ impl Search {
         DecisionTree::Guess { word, branches }
     }
 
-    fn pattern(&self, guess: usize, target: usize) -> usize {
+    fn pattern(&self, guess: usize, target: usize) -> Result {
         self.feedback.pattern(self.feedback_indices[guess], self.feedback_indices[target])
     }
 
@@ -317,16 +312,16 @@ impl Search {
         if stop.load(Ordering::Relaxed) {
             return None;
         }
-        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); PATTERNS];
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); Result::COUNT];
         let limit = capacity(depth - 1);
         for &target in candidates {
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
             let pattern = self.pattern(guess, target);
-            if pattern != ALL_GREEN {
-                groups[pattern].push(target);
-                if groups[pattern].len() > limit || groups[pattern].len() == candidates.len() {
+            if pattern != Result::ALL_GREEN {
+                groups[pattern.index()].push(target);
+                if groups[pattern.index()].len() > limit || groups[pattern.index()].len() == candidates.len() {
                     return Some(false);
                 }
             }
@@ -363,13 +358,13 @@ impl Search {
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
-            let mut counts = [0usize; PATTERNS];
+            let mut counts = [0usize; Result::COUNT];
             let mut largest = 0;
             for &target in candidates {
                 let pattern = self.pattern(guess, target);
-                if pattern != ALL_GREEN {
-                    counts[pattern] += 1;
-                    largest = largest.max(counts[pattern]);
+                if pattern != Result::ALL_GREEN {
+                    counts[pattern.index()] += 1;
+                    largest = largest.max(counts[pattern.index()]);
                     if largest > child_capacity {
                         break;
                     }
@@ -399,7 +394,7 @@ impl Search {
 
 // One winning target plus at most 242 non-winning feedback groups per guess.
 fn capacity(depth: usize) -> usize {
-    (0..depth).fold(0usize, |n, _| n.saturating_mul(242).saturating_add(1))
+    (0..depth).fold(0usize, |n, _| n.saturating_mul(Result::COUNT - 1).saturating_add(1))
 }
 
 #[cfg(test)]
