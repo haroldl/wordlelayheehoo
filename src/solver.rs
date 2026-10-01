@@ -281,7 +281,9 @@ struct Search {
     // Indexed by WordIndex; values refer to the shared feedback vocabulary.
     feedback_indices: Vec<FeedbackWordIndex>,
     // Locks cover lookups and inserts only, never scoring or recursive search.
-    // Some(guess) is a complete winning proof; None is a proven failure.
+    // Key: the game state as the list of remaining candidate words not ruled out,
+    //      and the remaining allowed decision tree depth.
+    // Value: Some(guess) is a complete winning proof; None is a proven failure.
     memo: Mutex<HashMap<(Vec<WordIndex>, usize), Option<WordIndex>>>,
 }
 

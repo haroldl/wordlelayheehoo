@@ -45,7 +45,9 @@ fn tree(value: Value, played: &mut Vec<Word>) -> io::Result<DecisionTree> {
         let mut letters = [LetterResult::Grey; 5];
         for (letter, symbol) in letters.iter_mut().zip(bytes) {
             *letter = match symbol {
-                b'_' => LetterResult::Grey, b'+' => LetterResult::Gold, b'*' => LetterResult::Green,
+                b'_' => LetterResult::Grey,
+                b'+' => LetterResult::Gold,
+                b'*' => LetterResult::Green,
                 _ => return Err(invalid("feedback symbols must be _, +, or *")),
             };
         }
