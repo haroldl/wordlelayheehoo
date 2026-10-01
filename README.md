@@ -20,6 +20,14 @@ To search the full dictionary:
 cargo run --release -- -w 20 -o tree.json
 ```
 
+To solve a puzzle later using the saved tree:
+
+```bash
+cargo run --release -- --load-tree tree.json --interactive
+```
+
+Interaction is disabled by default, so building and saving a tree exits without prompting. Add `--interactive` to either a build or load command to enter feedback using `_` (grey), `+` (gold), and `*` (green), or `q` to quit.
+
 ## Options
 
 | Option | Default | Meaning |
@@ -28,6 +36,7 @@ cargo run --release -- -w 20 -o tree.json
 | `-w`, `--workers N` | `10` | Number of solver workers; must be positive. |
 | `-o`, `--output FILE` | No file | Write the winning decision tree as indented JSON, replacing an existing file. |
 | `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit worker and sampling options. |
+| `--interactive` | `false` | Prompt for feedback to solve a puzzle using the built or loaded tree. |
 | `-h`, `--help` | | Show command-line help. |
 
 ## Random sampling
