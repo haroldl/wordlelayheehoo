@@ -30,7 +30,7 @@ fn hard_mode_keeps_greens_and_counts_revealed_duplicates() {
 }
 
 #[test]
-fn hard_mode_memo_distinguishes_histories_with_identical_candidates() {
+fn hard_mode_feasibility_distinguishes_histories_with_identical_candidates() {
     use super::HardModeHints;
     use crate::{Result, Word};
     use std::sync::atomic::AtomicBool;
@@ -54,6 +54,22 @@ fn hard_mode_memo_distinguishes_histories_with_identical_candidates() {
     assert_eq!(search.can_solve(&candidates, 4, hints, &stop), Some(false));
     assert_eq!(search.can_solve(&candidates, 5, hints, &stop), Some(true));
     assert_eq!(search.can_solve(&candidates, 2, empty, &stop), Some(true));
+}
+
+#[test]
+fn cancelled_feasibility_is_not_reported_as_failure() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let words: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
+        .into_iter().map(|word| crate::Word::new(word).unwrap()).collect();
+    let mut solver = MinimaxSolver::new(1, false);
+    let (search, candidates, _) = solver.prove(&words, &words[..4], 4).unwrap();
+    let stop = AtomicBool::new(true);
+    for depth in [1, 2] {
+        assert_eq!(search.can_solve(&candidates, depth, None, &stop), None);
+    }
+    stop.store(false, Ordering::Relaxed);
+    assert_eq!(search.can_solve(&candidates, 1, None, &stop), Some(false));
+    assert_eq!(search.can_solve(&candidates, 2, None, &stop), Some(true));
 }
 
 #[test]

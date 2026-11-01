@@ -1,10 +1,13 @@
 //! Bounded strategy search with a reusable, fixed-size worker pool.
 //! Using the full remaining budget, queued jobs evaluate proposed first guesses.
 //! The first proven winning strategy is accepted without iterative deepening.
-//! Each job searches its feedback subtrees recursively; workers share proven
-//! subproblem results and cached guess–target feedback. The feedback table
-//! persists across searches in the same pool; each allocated pair uses one byte. Workers never wait for jobs in their own pool, avoiding
-//! nested-pool deadlocks and limiting total concurrency to the configured count.
+//! Feasibility checks use depth-first search without retaining subproblem
+//! results or reconstruction links. Tree construction repeats these checks for
+//! each reachable branch, trading repeated work for bounded search memory.
+//! Workers share cached guess–target feedback; each pair uses one byte and the
+//! table persists across searches. Workers never wait for jobs in their own
+//! pool, avoiding nested-pool deadlocks and limiting total concurrency to the
+//! configured count.
 //! Previously guessed words are excluded on entry. Deeper repeated guesses give
 //! one non-winning group with every candidate and are rejected as no progress.
 
@@ -23,15 +26,6 @@ const GUESSES_PER_JOB: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 struct WordIndex(usize);
-
-/// Remaining targets, depth budget, and branch-specific hard-mode hints.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct GameState {
-    candidates: Vec<WordIndex>,
-    /// Remaining depth budget, not this state's depth in the overall tree.
-    depth: usize,
-    hints: Option<HardModeHints>,
-}
 
 /// Only positive feedback constrains hard-mode guesses. Gold letters may stay
 /// in the same position; grey letters impose no exclusions or upper counts.
@@ -210,7 +204,8 @@ impl MinimaxSolver {
             .map(|tree| tree.worst_case_guesses())
     }
 
-    /// Finds a strategy within max_depth and reconstructs it from saved proofs.
+    /// Finds a winning opening within max_depth, then searches each branch again
+    /// to construct the tree without retaining the feasibility search's states.
     /// Accepts the first success; worker schedules may select different strategies.
     /// Does not search smaller budgets to minimize the strategy's length.
     pub fn decision_tree(
@@ -219,8 +214,10 @@ impl MinimaxSolver {
         candidates: &[Word],
         max_depth: usize,
     ) -> Option<DecisionTree> {
-        let (search, candidates, depth) = self.prove(allowed, candidates, max_depth)?;
-        Some(search.build_tree(&candidates, depth, self.hard_mode.then(HardModeHints::default)))
+        let (search, candidates, guess) = self.prove(allowed, candidates, max_depth)?;
+        Some(search.build_tree_with_guess(
+            &candidates, max_depth, self.hard_mode.then(HardModeHints::default), guess,
+        ))
     }
 
     fn prove(
@@ -228,7 +225,7 @@ impl MinimaxSolver {
         allowed: &[Word],
         candidates: &[Word],
         max_depth: usize,
-    ) -> Option<(Arc<Search>, Arc<Vec<WordIndex>>, usize)> {
+    ) -> Option<(Arc<Search>, Arc<Vec<WordIndex>>, WordIndex)> {
         let mut words = allowed.to_vec();
         words.sort_unstable();
         words.dedup();
@@ -244,9 +241,7 @@ impl MinimaxSolver {
         let feedback = self.feedback_table(&words);
         let feedback_indices = words.iter()
             .map(|word| FeedbackWordIndex(feedback.words.binary_search(word).unwrap())).collect();
-        let search = Arc::new(Search {
-            words, feedback, feedback_indices, memo: Mutex::new(HashMap::new()),
-        });
+        let search = Arc::new(Search { words, feedback, feedback_indices });
         let candidates = Arc::new(candidates);
         // Try candidate guesses first, but retain every allowed probe word.
         let guesses: Vec<_> = candidates.iter().copied().chain(
@@ -256,7 +251,8 @@ impl MinimaxSolver {
         let depth = max_depth;
         let hints = self.hard_mode.then(HardModeHints::default);
         if candidates.len() <= depth {
-            return Some((search, candidates, depth));
+            let guess = candidates[0];
+            return Some((search, candidates, guess));
         }
         if depth <= 1 || candidates.len() > capacity(depth) {
             return None;
@@ -279,12 +275,11 @@ impl MinimaxSolver {
                             break;
                         }
                         if search.guess_works(&candidates, depth, hints, guess, &found) == Some(true) {
-                            let state = GameState { candidates: candidates.to_vec(), depth, hints };
-                            search.memo.lock().unwrap().insert(state, Some(guess));
                             found.store(true, Ordering::Relaxed);
-                            break;
+                            return Some(guess);
                         }
                     }
+                    None
                 }));
                 if outcome.is_err() {
                     found.store(true, Ordering::Relaxed);
@@ -295,20 +290,20 @@ impl MinimaxSolver {
         }
         drop(completed);
         let mut panic = None;
+        let mut winner = None;
         // Drain every job before returning. In-flight
         // branches check found cooperatively; queued batches skip their work.
         for _ in 0..submitted {
-            if let Err(payload) = results.recv().expect("minimax job failed to report") {
-                panic = Some(payload);
+            match results.recv().expect("minimax job failed to report") {
+                Ok(Some(guess)) if winner.is_none() => winner = Some(guess),
+                Err(payload) => panic = Some(payload),
+                _ => {}
             }
         }
         if let Some(payload) = panic {
             std::panic::resume_unwind(payload);
         }
-        if found.load(Ordering::Relaxed) {
-            return Some((search, candidates, depth));
-        }
-        None
+        winner.map(|guess| (search, candidates, guess))
     }
 }
 
@@ -332,24 +327,21 @@ struct Search {
     feedback: Arc<FeedbackTable>,
     // Indexed by WordIndex; values refer to the shared feedback vocabulary.
     feedback_indices: Vec<FeedbackWordIndex>,
-    // Locks cover lookups and inserts only, never scoring or recursive search.
-    // Value: Some(guess) is a complete winning proof; None is a proven failure.
-    memo: Mutex<HashMap<GameState, Option<WordIndex>>>,
 }
 
 impl Search {
-    /// Replays recorded guesses without running minimax again. The sequential
-    /// candidate shortcut also has a constructive proof: guess a candidate and
-    /// continue on its smaller feedback groups until the target is hit.
+    /// Repeats feasibility search for this branch, retaining only its first
+    /// winning guess. No state or proof from an earlier check is needed.
     fn build_tree(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>) -> DecisionTree {
         assert!(depth > 0 && !candidates.is_empty());
-        let guess = if candidates.len() <= depth {
-            candidates[0]
-        } else {
-            let state = GameState { candidates: candidates.to_vec(), depth, hints };
-            self.memo.lock().unwrap().get(&state)
-                .copied().flatten().expect("successful search must retain a winning guess")
-        };
+        let guess = self.find_guess(candidates, depth, hints, &AtomicBool::new(false))
+            .expect("a proven branch must have a winning guess");
+        self.build_tree_with_guess(candidates, depth, hints, guess)
+    }
+
+    /// Builds only the chosen strategy, discarding each branch's temporary DFS
+    /// allocations before moving on to the next branch.
+    fn build_tree_with_guess(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, guess: WordIndex) -> DecisionTree {
         let word = self.words[guess.0];
         let mut groups: HashMap<Result, Vec<WordIndex>> = HashMap::new();
         for &target in candidates {
@@ -407,26 +399,31 @@ impl Search {
         Some(true)
     }
 
-    // Can we solve all possible target words with some (any) choice of the candidate words as our next guess?
-    // Mutually recursive with guess_works.
-    // None means cancelled, never a proof of failure and never memoized.
+    // Can any allowed guess solve all remaining targets? None means cancelled,
+    // not a proof of failure. Feasibility checks retain no subproblem results.
     fn can_solve(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, stop: &AtomicBool) -> Option<bool> {
+        let guess = self.find_guess(candidates, depth, hints, stop);
+        if stop.load(Ordering::Relaxed) {
+            None
+        } else {
+            Some(guess.is_some())
+        }
+    }
+
+    // Returns the first winning guess in heuristic order, or None on failure
+    // or cancellation. Callers checking feasibility must also inspect stop.
+    fn find_guess(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, stop: &AtomicBool) -> Option<WordIndex> {
         if stop.load(Ordering::Relaxed) {
             return None;
         }
         if candidates.len() <= depth {
-            return Some(true);
+            return candidates.first().copied();
         }
         if depth <= 1 || candidates.len() > capacity(depth) {
-            return Some(false);
+            return None;
         }
         // Every remaining target satisfies the hints, so sequential candidate
         // guesses (including the shortcut above) remain legal in hard mode.
-        let state = GameState { candidates: candidates.to_vec(), depth, hints };
-        if let Some(&answer) = self.memo.lock().unwrap().get(&state) {
-            return Some(answer.is_some());
-        }
-
         let child_capacity = capacity(depth - 1);
         let mut ranked = Vec::new();
         for guess in (0..self.words.len()).map(WordIndex) {
@@ -452,8 +449,7 @@ impl Search {
                 continue;
             }
             if largest < depth {
-                self.memo.lock().unwrap().insert(state, Some(guess));
-                return Some(true);
+                return Some(guess);
             }
             let squares: usize = counts.iter().map(|&count| count * count).sum();
             ranked.push((largest, squares, guess));
@@ -461,12 +457,10 @@ impl Search {
         ranked.sort_unstable();
         for (_, _, guess) in ranked {
             if self.guess_works(candidates, depth, hints, guess, stop)? {
-                self.memo.lock().unwrap().insert(state, Some(guess));
-                return Some(true);
+                return Some(guess);
             }
         }
-        self.memo.lock().unwrap().insert(state, None);
-        Some(false)
+        None
     }
 }
 

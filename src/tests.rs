@@ -419,6 +419,29 @@ fn decision_tree_includes_non_candidate_probe_and_final_correct_guess() {
 }
 
 #[test]
+fn decision_tree_researches_branches_that_need_non_candidate_probes() {
+    let candidates: Vec<_> = [
+        "aaaaa", "baaaa", "caaaa", "daaaa", "aaaab", "baaab", "caaab", "daaab",
+    ].into_iter().map(|word| Word::new(word).unwrap()).collect();
+    let probe = Word::new("bcddd").unwrap();
+    let mut allowed = candidates.clone();
+    allowed.push(probe);
+    for workers in [1, 10, 20] {
+        let tree = super::solver::MinimaxSolver::new(workers, false)
+            .decision_tree(&allowed, &candidates, 3).unwrap();
+        // The first opening works, but both of its three-target branches need
+        // a probe to fit the two guesses left. Building them must search again.
+        assert_eq!(tree.guess(), Some(candidates[0]));
+        for target in ["baaaa", "baaab"] {
+            let feedback = Result::from_guess(candidates[0], Word::new(target).unwrap());
+            assert_eq!(tree.after_result(feedback).unwrap().guess(), Some(probe));
+        }
+        verify_decision_tree(&tree, &allowed, &candidates,
+            &std::collections::HashSet::new(), 3);
+    }
+}
+
+#[test]
 fn solver_accepts_a_longer_strategy_when_it_fits_the_budget() {
     let candidates: Vec<_> = ["aaaaa", "baaaa", "caaaa"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();

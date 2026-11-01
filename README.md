@@ -4,6 +4,14 @@ A Wordle strategy solver in Rust. Starting from an empty game state, it searches
 
 Cargo processes `WORD.LST` at build time, keeping five-letter ASCII words and normalizing them to lowercase. The resulting `WORDS` dictionary is embedded in the executable and supplies both allowed guesses and possible targets.
 
+## Search and memory
+
+Workers test opening guesses in parallel. Each feasibility check uses depth-first search to determine whether every reachable feedback outcome can be solved within the remaining guess budget. Checks retain no game-state cache or reconstruction links. After finding a winning opening, the solver repeats feasibility searches for each reachable branch to select its next guess and build the final tree. Hard-mode hints are carried through both phases.
+
+This trades repeated computation for search memory that depends on the vocabulary, worker count, and depth budget rather than the number of states explored. It uses the full budget and accepts the first proven strategy; it does not increase the budget through iterative deepening. Recursive guesses retain their existing ordering by largest feedback group, then sum of squared group sizes.
+
+The solver still retains the output tree and a shared, precomputed feedback table using one byte per allowed guess–target pair (about 72 MiB for the full dictionary). More workers increase temporary DFS memory. Difficult or impossible searches can take substantially longer without memoization; there is currently no bounded state cache.
+
 ## Run
 
 Use a release build for searches:
