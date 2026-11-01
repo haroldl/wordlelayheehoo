@@ -1,5 +1,5 @@
 use clap::Parser;
-use super::{LetterResult, MAX_GUESSES, Result, Word, WORDS};
+use super::{DEFAULT_MAX_GUESSES, LetterResult, Result, Word, WORDS};
 use LetterResult::{Gold, Green, Grey};
 
 // Fixed vocabulary for solver tests; independent of the production WORD.LST.
@@ -214,6 +214,24 @@ fn worker_count_arguments_are_validated() {
 }
 
 #[test]
+fn max_guesses_arguments_are_validated() {
+    let defaults = super::Args::try_parse_from(["wordlelayheehoo"]).unwrap();
+    assert_eq!(defaults.max_guesses.get(), DEFAULT_MAX_GUESSES);
+    for value in ["1", "5", "6", "10"] {
+        let args = super::Args::try_parse_from(
+            ["wordlelayheehoo", "--max-guesses", value]
+        ).unwrap();
+        assert_eq!(args.max_guesses.get(), value.parse::<usize>().unwrap());
+    }
+    for value in ["0", "-1", "abc", "1.5"] {
+        assert!(super::Args::try_parse_from(
+            ["wordlelayheehoo", "--max-guesses", value]
+        ).is_err());
+    }
+    assert!(super::Args::try_parse_from(["wordlelayheehoo", "--max-guesses"]).is_err());
+}
+
+#[test]
 fn cli_supports_help_and_version() {
     for (flag, kind) in [
         ("-h", clap::error::ErrorKind::DisplayHelp),
@@ -317,9 +335,9 @@ fn hard_mode_trees_preserve_hints_across_multiple_levels() {
     let words: Vec<_> = TEST_WORDS.iter().map(|word| Word::new(word).unwrap()).collect();
     for workers in [1, 10] {
         let tree = super::solver::MinimaxSolver::new(workers, true)
-            .decision_tree(&words, &words, MAX_GUESSES).unwrap();
+            .decision_tree(&words, &words, DEFAULT_MAX_GUESSES).unwrap();
         verify_decision_tree(&tree, &words, &words,
-            &std::collections::HashSet::new(), MAX_GUESSES);
+            &std::collections::HashSet::new(), DEFAULT_MAX_GUESSES);
         verify_hard_mode_tree(&tree, &mut Vec::new());
     }
 }
@@ -451,12 +469,12 @@ fn solver_accepts_a_longer_strategy_when_it_fits_the_budget() {
         let mut solver = super::solver::MinimaxSolver::new(workers, false);
         // A probe can solve in two, but sequential candidate guesses fit six.
         assert_eq!(solver.strategy_guesses(&allowed, &candidates, 2), Some(2));
-        let tree = solver.decision_tree(&allowed, &candidates, MAX_GUESSES).unwrap();
+        let tree = solver.decision_tree(&allowed, &candidates, DEFAULT_MAX_GUESSES).unwrap();
         assert_eq!(tree.guess(), Some(candidates[0]));
         assert_eq!(tree.worst_case_guesses(), 3);
-        assert_eq!(solver.strategy_guesses(&allowed, &candidates, MAX_GUESSES), Some(3));
+        assert_eq!(solver.strategy_guesses(&allowed, &candidates, DEFAULT_MAX_GUESSES), Some(3));
         verify_decision_tree(&tree, &allowed, &candidates,
-            &std::collections::HashSet::new(), MAX_GUESSES);
+            &std::collections::HashSet::new(), DEFAULT_MAX_GUESSES);
     }
 }
 
@@ -588,7 +606,7 @@ fn rejects_invalid_saved_tree_nodes() {
 fn load_tree_cli_accepts_output_and_rejects_search_options() {
     let args = super::Args::try_parse_from(["wordlelayheehoo", "--load-tree", "tree.json", "-o", "copy.json"]).unwrap();
     assert_eq!(args.load_tree.unwrap(), std::path::PathBuf::from("tree.json"));
-    for extra in [vec!["-w", "2"], vec!["--sample-percent", "10"]] {
+    for extra in [vec!["-w", "2"], vec!["--sample-percent", "10"], vec!["--max-guesses", "5"]] {
         assert!(super::Args::try_parse_from(
             ["wordlelayheehoo", "--load-tree", "tree.json"].into_iter().chain(extra)
         ).is_err());
@@ -640,7 +658,7 @@ fn decision_tree_solves_test_candidates_after_an_opening() {
         .filter(|word| !opening.contains(word)).collect();
     assert!(candidates.contains(&target));
     assert!(candidates.len() > 1);
-    let budget = MAX_GUESSES - opening.len();
+    let budget = DEFAULT_MAX_GUESSES - opening.len();
     let tree = super::solver::MinimaxSolver::new(10, false)
         .decision_tree(&allowed, &candidates, budget).unwrap();
     assert!((2..=budget).contains(&tree.worst_case_guesses()));

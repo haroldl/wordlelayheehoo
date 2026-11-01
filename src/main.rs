@@ -13,8 +13,8 @@ pub use words::{LetterResult, Result, WORDS, Word};
 use clap::Parser;
 use std::num::NonZeroUsize;
 
-/// Maximum number of guesses allowed in a game.
-pub const MAX_GUESSES: usize = 6;
+/// Default maximum number of guesses; override with --max-guesses G.
+pub const DEFAULT_MAX_GUESSES: usize = 6;
 
 /// Default number of minimax workers; override with --workers N.
 pub const DEFAULT_SOLVER_WORKERS: usize = 10;
@@ -22,6 +22,12 @@ pub const DEFAULT_SOLVER_WORKERS: usize = 10;
 #[derive(Parser)]
 #[command(version, about = "Wordle minimax solver")]
 struct Args {
+    /// Maximum number of guesses allowed to solve every selected target
+    #[arg(long, value_name = "G",
+        default_value_t = NonZeroUsize::new(DEFAULT_MAX_GUESSES)
+            .expect("default guess budget must be positive"))]
+    max_guesses: NonZeroUsize,
+
     /// Keep green letters fixed and reuse all revealed letters in later guesses
     #[arg(long)]
     hard_mode: bool,
@@ -45,7 +51,7 @@ struct Args {
     output: Option<std::path::PathBuf>,
 
     /// Load a saved JSON decision tree instead of running the solver
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["sample_percent", "workers", "hard_mode"])]
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["sample_percent", "workers", "hard_mode", "max_guesses"])]
     load_tree: Option<std::path::PathBuf>,
 
     /// Interactively solve a puzzle using the built or loaded decision tree
@@ -55,6 +61,7 @@ struct Args {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
+    let max_guesses = args.max_guesses.get();
     let solution = if let Some(path) = &args.load_tree {
         let load = || -> std::io::Result<DecisionTree> {
             DecisionTree::read_json(std::io::BufReader::new(std::fs::File::open(path)?))
@@ -77,9 +84,9 @@ fn main() -> std::io::Result<()> {
         let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
         let words = sampling::sample_words(WORDS, args.sample_percent, &mut rng);
         println!("Using {} words ({}%) as both guesses and targets.", words.len(), args.sample_percent);
-        println!("Searching from an empty game state with a {MAX_GUESSES}-guess budget.");
+        println!("Searching from an empty game state with a {max_guesses}-guess budget.");
         solver::MinimaxSolver::new(workers, args.hard_mode)
-            .decision_tree(&words, &words, MAX_GUESSES)
+            .decision_tree(&words, &words, max_guesses)
     };
 
     match solution {
@@ -108,7 +115,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         None => println!(
-            "No strategy guarantees solving every selected target within {MAX_GUESSES} total guesses."
+            "No strategy guarantees solving every selected target within {max_guesses} total guesses."
         ),
     }
     Ok(())
