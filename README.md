@@ -34,8 +34,9 @@ Interaction is disabled by default, so building and saving a tree exits without 
 | --- | --- | --- |
 | `--sample-percent PERCENT` | `100` | Percentage of dictionary entries used for both guesses and targets. Must be greater than 0 and at most 100; decimals are supported. |
 | `-w`, `--workers N` | `10` | Number of solver workers; must be positive. |
+| `--hard-mode` | `false` | Keep revealed green letters in position and reuse all green/gold letters in subsequent guesses, including revealed duplicate occurrences. Gold letters have no position restriction; grey letters impose no restrictions. |
 | `-o`, `--output FILE` | No file | Write the winning decision tree as indented JSON, replacing an existing file. |
-| `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit worker and sampling options. |
+| `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit worker, sampling, and hard-mode options. |
 | `--interactive` | `false` | Prompt for feedback to solve a puzzle using the built or loaded tree. |
 | `-h`, `--help` | | Show command-line help. |
 

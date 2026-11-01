@@ -22,6 +22,10 @@ pub const DEFAULT_SOLVER_WORKERS: usize = 10;
 #[derive(Parser)]
 #[command(version, about = "Wordle minimax solver")]
 struct Args {
+    /// Keep green letters fixed and reuse all revealed letters in later guesses
+    #[arg(long)]
+    hard_mode: bool,
+
     /// Number of solver worker threads
     #[arg(
         short = 'w',
@@ -41,7 +45,7 @@ struct Args {
     output: Option<std::path::PathBuf>,
 
     /// Load a saved JSON decision tree instead of running the solver
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["sample_percent", "workers"])]
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["sample_percent", "workers", "hard_mode"])]
     load_tree: Option<std::path::PathBuf>,
 
     /// Interactively solve a puzzle using the built or loaded decision tree
@@ -74,7 +78,8 @@ fn main() -> std::io::Result<()> {
         let words = sampling::sample_words(WORDS, args.sample_percent, &mut rng);
         println!("Using {} words ({}%) as both guesses and targets.", words.len(), args.sample_percent);
         println!("Searching from an empty game state with a {MAX_GUESSES}-guess budget.");
-        solver::MinimaxSolver::new(workers).decision_tree(&words, &words, MAX_GUESSES)
+        solver::MinimaxSolver::new(workers, args.hard_mode)
+            .decision_tree(&words, &words, MAX_GUESSES)
     };
 
     match solution {

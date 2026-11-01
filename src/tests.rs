@@ -216,6 +216,7 @@ fn worker_count_arguments_are_validated() {
 #[test]
 fn cli_supports_help_and_version() {
     for (flag, kind) in [
+        ("-h", clap::error::ErrorKind::DisplayHelp),
         ("--help", clap::error::ErrorKind::DisplayHelp),
         ("--version", clap::error::ErrorKind::DisplayVersion),
     ] {
@@ -225,11 +226,110 @@ fn cli_supports_help_and_version() {
 }
 
 #[test]
+fn hard_mode_argument_enables_mode_and_defaults_to_disabled() {
+    assert!(!super::Args::try_parse_from(["wordlelayheehoo"]).unwrap().hard_mode);
+    assert!(super::Args::try_parse_from(["wordlelayheehoo", "--hard-mode"]).unwrap().hard_mode);
+    assert!(super::Args::try_parse_from(
+        ["wordlelayheehoo", "--load-tree", "tree.json", "--hard-mode"]
+    ).is_err());
+}
+
+// Independent legality check against one historical guess, using a bag of
+// letters so separate revealed occurrences cannot reuse the same letter.
+fn meets_hard_mode_feedback(guess: Word, previous: Word, feedback: Result) -> bool {
+    let mut available = guess.as_bytes().to_vec();
+    for (position, result) in feedback.to_letters().into_iter().enumerate() {
+        let letter = previous.as_bytes()[position];
+        if result == Green && guess.as_bytes()[position] != letter {
+            return false;
+        }
+        if result != Grey {
+            let Some(index) = available.iter().position(|&found| found == letter) else {
+                return false;
+            };
+            available.remove(index);
+        }
+    }
+    true
+}
+
+fn exhaustive_hard_mode(allowed: &[Word], candidates: &[Word]) -> usize {
+    let mut best = candidates.len();
+    for &guess in allowed {
+        let mut groups: std::collections::HashMap<Result, Vec<Word>> =
+            std::collections::HashMap::new();
+        for &target in candidates {
+            if guess != target {
+                groups.entry(Result::from_guess(guess, target)).or_default().push(target);
+            }
+        }
+        if groups.values().any(|group| group.len() == candidates.len()) {
+            continue;
+        }
+        let worst = groups.into_iter().map(|(feedback, group)| {
+            let legal: Vec<_> = allowed.iter().copied()
+                .filter(|&word| meets_hard_mode_feedback(word, guess, feedback)).collect();
+            exhaustive_hard_mode(&legal, &group)
+        }).max().unwrap_or(0);
+        best = best.min(1 + worst);
+    }
+    best
+}
+
+fn verify_hard_mode_tree(tree: &super::DecisionTree, history: &mut Vec<(Word, Result)>) {
+    if let super::DecisionTree::Guess { word, branches } = tree {
+        for &(previous, feedback) in history.iter() {
+            assert!(meets_hard_mode_feedback(*word, previous, feedback),
+                "{} violates feedback from {}: {feedback:?}", word.as_str(), previous.as_str());
+        }
+        for (&feedback, next) in branches {
+            history.push((*word, feedback));
+            verify_hard_mode_tree(next, history);
+            history.pop();
+        }
+    }
+}
+
+#[test]
+fn hard_mode_matches_exhaustive_search_and_builds_legal_trees() {
+    let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "aaaab", "baaab", "caaab", "bcddd"]
+        .into_iter().map(|word| Word::new(word).unwrap()).collect();
+    for workers in [1, 10] {
+        let mut solver = super::solver::MinimaxSolver::new(workers, true);
+        for mask in 1..(1 << allowed.len()) {
+            let candidates: Vec<_> = allowed.iter().enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, &word)| word).collect();
+            let optimum = exhaustive_hard_mode(&allowed, &candidates);
+            let tree = solver.decision_tree(&allowed, &candidates, optimum).unwrap();
+            assert_eq!(tree.worst_case_guesses(), optimum, "subset {mask}");
+            verify_decision_tree(&tree, &allowed, &candidates,
+                &std::collections::HashSet::new(), optimum);
+            verify_hard_mode_tree(&tree, &mut Vec::new());
+            assert_eq!(solver.decision_tree(&allowed, &candidates, optimum - 1), None,
+                "subset {mask} fits below its optimum");
+        }
+    }
+}
+
+#[test]
+fn hard_mode_trees_preserve_hints_across_multiple_levels() {
+    let words: Vec<_> = TEST_WORDS.iter().map(|word| Word::new(word).unwrap()).collect();
+    for workers in [1, 10] {
+        let tree = super::solver::MinimaxSolver::new(workers, true)
+            .decision_tree(&words, &words, MAX_GUESSES).unwrap();
+        verify_decision_tree(&tree, &words, &words,
+            &std::collections::HashSet::new(), MAX_GUESSES);
+        verify_hard_mode_tree(&tree, &mut Vec::new());
+    }
+}
+
+#[test]
 fn queued_minimax_matches_exhaustive_search_with_one_ten_and_twenty_workers() {
     let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
     for workers in [1, 10, 20] {
-        let mut solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers, false);
         for mask in 1..(1 << allowed.len()) {
             let candidates: Vec<_> = allowed.iter().enumerate()
                 .filter(|(index, _)| mask & (1 << index) != 0)
@@ -248,7 +348,7 @@ fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
     // More than 16 words forces work into multiple queue jobs.
     let words: Vec<_> = (b'a'..=b't').map(|letter| Word::new(&format!("{}zzzz", char::from(letter))).unwrap()).collect();
     for workers in [1, 10, 20] {
-        let mut solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers, false);
         assert_eq!(solver.strategy_guesses(&words, &words, 3), None);
         assert_eq!(solver.strategy_guesses(&words, &words[..1], 1), Some(1));
     }
@@ -290,7 +390,7 @@ fn decision_trees_cover_all_targets_at_the_exhaustive_optimum() {
     let allowed: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
     for workers in [1, 10, 20] {
-        let mut solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers, false);
         for mask in 1..(1 << allowed.len()) {
             let candidates: Vec<_> = allowed.iter().enumerate()
                 .filter(|(index, _)| mask & (1 << index) != 0)
@@ -311,7 +411,7 @@ fn decision_tree_includes_non_candidate_probe_and_final_correct_guess() {
     let probe = Word::new("bcddd").unwrap();
     let mut allowed = candidates.clone();
     allowed.push(probe);
-    let mut solver = super::solver::MinimaxSolver::new(10);
+    let mut solver = super::solver::MinimaxSolver::new(10, false);
     let tree = solver.decision_tree(&allowed, &candidates, 2).unwrap();
     assert_eq!(tree.guess(), Some(probe));
     assert_eq!(tree.after_result(Result::ALL_GREEN), None);
@@ -325,7 +425,7 @@ fn solver_accepts_a_longer_strategy_when_it_fits_the_budget() {
     let mut allowed = candidates.clone();
     allowed.push(Word::new("bcddd").unwrap());
     for workers in [1, 10, 20] {
-        let mut solver = super::solver::MinimaxSolver::new(workers);
+        let mut solver = super::solver::MinimaxSolver::new(workers, false);
         // A probe can solve in two, but sequential candidate guesses fit six.
         assert_eq!(solver.strategy_guesses(&allowed, &candidates, 2), Some(2));
         let tree = solver.decision_tree(&allowed, &candidates, MAX_GUESSES).unwrap();
@@ -421,7 +521,7 @@ fn sampling_preserves_full_dictionary_and_selects_without_replacement() {
 fn saved_trees_round_trip_through_json() {
     let words: Vec<_> = ["apple", "ample", "arose"].into_iter()
         .map(|text| Word::new(text).unwrap()).collect();
-    let tree = super::solver::MinimaxSolver::new(1).decision_tree(&words, &words, 3).unwrap();
+    let tree = super::solver::MinimaxSolver::new(1, false).decision_tree(&words, &words, 3).unwrap();
     let mut bytes = Vec::new();
     tree.write_json(&mut bytes).unwrap();
     assert_eq!(super::DecisionTree::read_json(bytes.as_slice()).unwrap(), tree);
@@ -518,7 +618,7 @@ fn decision_tree_solves_test_candidates_after_an_opening() {
     assert!(candidates.contains(&target));
     assert!(candidates.len() > 1);
     let budget = MAX_GUESSES - opening.len();
-    let tree = super::solver::MinimaxSolver::new(10)
+    let tree = super::solver::MinimaxSolver::new(10, false)
         .decision_tree(&allowed, &candidates, budget).unwrap();
     assert!((2..=budget).contains(&tree.worst_case_guesses()));
     verify_decision_tree(&tree, &allowed, &candidates, &opening.into(), budget);
