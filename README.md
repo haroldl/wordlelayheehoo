@@ -6,11 +6,13 @@ Cargo processes `WORD.LST` at build time, keeping five-letter ASCII words and no
 
 ## Search and memory
 
-Workers test opening guesses in parallel. Each feasibility check uses depth-first search to determine whether every reachable feedback outcome can be solved within the remaining guess budget. Checks retain no game-state cache or reconstruction links. After finding a winning opening, the solver repeats feasibility searches for each reachable branch to select its next guess and build the final tree. Hard-mode hints are carried through both phases.
+Workers take both opening and deeper search tasks from a shared queue. A coordinator owns a bipartite graph of guessed words and feedback Results: a Result needs any one winning next guess, while a guess needs a solution for every reachable Result. Workers return completed work without waiting for child tasks, so even a single worker can process the graph.
 
-This trades repeated computation for search memory that depends on the vocabulary, worker count, and depth budget rather than the number of states explored. It uses the full budget and accepts the first proven strategy; it does not increase the budget through iterative deepening. Recursive guesses retain their existing ordering by largest feedback group, then sum of squared group sizes.
+Once a guess is proven, competing guesses and their descendants are cancelled. If any Result is impossible, its guess is rejected and that guess's other Result branches are cancelled. Cancellation removes queued work before dispatch, cooperatively stops running work, and ignores late completions. Successful subtrees are retained and assembled directly into the output tree, without a second search. Hard-mode hints follow each branch's history.
 
-The solver still retains the output tree and a shared, precomputed feedback table using one byte per allowed guess–target pair (about 72 MiB for the full dictionary). More workers increase temporary DFS memory. Difficult or impossible searches can take substantially longer without memoization; there is currently no bounded state cache.
+The parallel frontier is bounded: at most two guesses compete per expanded Result, and at most twice the worker count of Results are expanded at once, including the initial state. Result groups with at most 16 targets, groups whose targets can simply be guessed within the budget, and groups beyond the frontier limit use local depth-first search. Search memory depends on the vocabulary, worker count, depth budget, and retained strategy branches rather than the total number of states explored. There is no state cache. More workers increase temporary search memory, and difficult or impossible searches can take substantially longer without memoization.
+
+The solver uses the full budget and accepts the first proven strategy; it does not increase the budget through iterative deepening or minimize the strategy's length. Openings are tried in candidate-first order. Deeper guesses are ordered by largest feedback group, then sum of squared group sizes. Worker scheduling can change which strategy is found first. Workers also share a precomputed feedback table using one byte per allowed guess–target pair (about 72 MiB for the full dictionary).
 
 ## Run
 

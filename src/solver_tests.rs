@@ -33,16 +33,17 @@ fn hard_mode_keeps_greens_and_counts_revealed_duplicates() {
 fn hard_mode_feasibility_distinguishes_histories_with_identical_candidates() {
     use super::HardModeHints;
     use crate::{Result, Word};
-    use std::sync::atomic::AtomicBool;
+    use super::{Cancellation, SearchOutcome};
     let words: Vec<_> = ["baste", "caste", "haste", "paste", "taste", "bchpt"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
     let mut solver = MinimaxSolver::new(1, true);
-    let (search, candidates, _) = solver.prove(&words, &words[..5], 5).unwrap();
-    let stop = AtomicBool::new(false);
+    let (search, candidates) = solver.prepare(&words, &words[..5]).unwrap();
+    let stop = Cancellation::default();
     let empty = Some(HardModeHints::default());
     // With no clues, the non-candidate probe distinguishes every target.
-    assert_eq!(search.can_solve(&candidates, 2, empty, &stop), Some(true));
-    let tree = search.build_tree(&candidates, 2, empty);
+    let SearchOutcome::Solved(tree) = search.solve(&candidates, 2, empty, &stop) else {
+        panic!("probe must solve this state");
+    };
     assert_eq!(tree.guess(), Word::new("bchpt"));
 
     // After waste -> _****, only candidates meet the clues. Every miss
@@ -50,26 +51,60 @@ fn hard_mode_feasibility_distinguishes_histories_with_identical_candidates() {
     let previous = Word::new("waste").unwrap();
     let hints = Some(HardModeHints::default().after_feedback(previous,
         Result::from_guess(previous, words[0])));
-    assert_eq!(search.can_solve(&candidates, 2, hints, &stop), Some(false));
-    assert_eq!(search.can_solve(&candidates, 4, hints, &stop), Some(false));
-    assert_eq!(search.can_solve(&candidates, 5, hints, &stop), Some(true));
-    assert_eq!(search.can_solve(&candidates, 2, empty, &stop), Some(true));
+    assert_eq!(search.solve(&candidates, 2, hints, &stop), SearchOutcome::Impossible);
+    assert_eq!(search.solve(&candidates, 4, hints, &stop), SearchOutcome::Impossible);
+    assert!(matches!(search.solve(&candidates, 5, hints, &stop), SearchOutcome::Solved(_)));
+    assert!(matches!(search.solve(&candidates, 2, empty, &stop), SearchOutcome::Solved(_)));
 }
 
 #[test]
-fn cancelled_feasibility_is_not_reported_as_failure() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+fn cancelled_search_is_not_reported_as_failure() {
+    use super::{Cancellation, SearchOutcome};
     let words: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
         .into_iter().map(|word| crate::Word::new(word).unwrap()).collect();
     let mut solver = MinimaxSolver::new(1, false);
-    let (search, candidates, _) = solver.prove(&words, &words[..4], 4).unwrap();
-    let stop = AtomicBool::new(true);
+    let (search, candidates) = solver.prepare(&words, &words[..4]).unwrap();
+    let stop = Cancellation::default();
+    stop.cancel();
     for depth in [1, 2] {
-        assert_eq!(search.can_solve(&candidates, depth, None, &stop), None);
+        assert_eq!(search.solve(&candidates, depth, None, &stop), SearchOutcome::Cancelled);
     }
-    stop.store(false, Ordering::Relaxed);
-    assert_eq!(search.can_solve(&candidates, 1, None, &stop), Some(false));
-    assert_eq!(search.can_solve(&candidates, 2, None, &stop), Some(true));
+    let stop = Cancellation::default();
+    assert_eq!(search.solve(&candidates, 1, None, &stop), SearchOutcome::Impossible);
+    assert!(matches!(search.solve(&candidates, 2, None, &stop), SearchOutcome::Solved(_)));
+}
+
+#[test]
+fn local_search_retains_winning_non_candidate_probes() {
+    use super::{Cancellation, SearchOutcome};
+    use crate::{DecisionTree, Result, Word};
+    let targets: Vec<_> = [
+        "aaaaa", "baaaa", "caaaa", "daaaa", "aaaab", "baaab", "caaab", "daaab",
+    ].into_iter().map(|word| Word::new(word).unwrap()).collect();
+    let probe = Word::new("bcddd").unwrap();
+    let mut allowed = targets.clone();
+    allowed.push(probe);
+    let mut pool = MinimaxSolver::new(1, false);
+    let (search, candidates) = pool.prepare(&allowed, &targets).unwrap();
+    let opening = super::WordIndex(search.words.binary_search(&targets[0]).unwrap());
+    let SearchOutcome::Solved(tree) = search.solve_guess(
+        &candidates, 3, None, opening, &Cancellation::default(),
+    ) else { panic!("opening must work") };
+    for target in ["baaaa", "baaab"] {
+        let feedback = Result::from_guess(targets[0], Word::new(target).unwrap());
+        assert_eq!(tree.after_result(feedback).unwrap().guess(), Some(probe));
+    }
+    for target in targets {
+        let mut node = &tree;
+        let mut played = HashSet::new();
+        while let Some(guess) = node.guess() {
+            assert!(played.insert(guess));
+            assert!(played.len() <= 3);
+            node = node.after_result(Result::from_guess(guess, target)).unwrap();
+        }
+        assert_eq!(node, &DecisionTree::Solved);
+        assert!(played.contains(&target));
+    }
 }
 
 #[test]

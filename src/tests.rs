@@ -139,7 +139,7 @@ fn minimax_can_use_a_non_candidate_probe() {
 
 // Independent exhaustive recurrence for tiny dictionaries, with no memoization,
 // depth feasibility search, ranking, or capacity pruning.
-fn exhaustive_minimax(allowed: &[Word], candidates: &[Word]) -> usize {
+pub(crate) fn exhaustive_minimax(allowed: &[Word], candidates: &[Word]) -> usize {
     let mut best = candidates.len();
     for &guess in allowed {
         let mut groups: std::collections::HashMap<Result, Vec<Word>> =
@@ -271,7 +271,7 @@ fn meets_hard_mode_feedback(guess: Word, previous: Word, feedback: Result) -> bo
     true
 }
 
-fn exhaustive_hard_mode(allowed: &[Word], candidates: &[Word]) -> usize {
+pub(crate) fn exhaustive_hard_mode(allowed: &[Word], candidates: &[Word]) -> usize {
     let mut best = candidates.len();
     for &guess in allowed {
         let mut groups: std::collections::HashMap<Result, Vec<Word>> =
@@ -294,7 +294,7 @@ fn exhaustive_hard_mode(allowed: &[Word], candidates: &[Word]) -> usize {
     best
 }
 
-fn verify_hard_mode_tree(tree: &super::DecisionTree, history: &mut Vec<(Word, Result)>) {
+pub(crate) fn verify_hard_mode_tree(tree: &super::DecisionTree, history: &mut Vec<(Word, Result)>) {
     if let super::DecisionTree::Guess { word, branches } = tree {
         for &(previous, feedback) in history.iter() {
             assert!(meets_hard_mode_feedback(*word, previous, feedback),
@@ -361,9 +361,9 @@ fn queued_minimax_matches_exhaustive_search_with_one_ten_and_twenty_workers() {
 }
 
 #[test]
-fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
+fn queued_minimax_exhausts_alternatives_without_a_winning_strategy() {
     // A shared suffix makes each missed candidate eliminate only itself.
-    // More than 16 words forces work into multiple queue jobs.
+    // All opening guesses must fail before impossibility can be reported.
     let words: Vec<_> = (b'a'..=b't').map(|letter| Word::new(&format!("{}zzzz", char::from(letter))).unwrap()).collect();
     for workers in [1, 10, 20] {
         let mut solver = super::solver::MinimaxSolver::new(workers, false);
@@ -372,7 +372,7 @@ fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
     }
 }
 
-fn verify_decision_tree(
+pub(crate) fn verify_decision_tree(
     tree: &super::DecisionTree,
     allowed: &[Word],
     candidates: &[Word],
@@ -437,7 +437,7 @@ fn decision_tree_includes_non_candidate_probe_and_final_correct_guess() {
 }
 
 #[test]
-fn decision_tree_researches_branches_that_need_non_candidate_probes() {
+fn decision_tree_retains_branches_that_need_non_candidate_probes() {
     let candidates: Vec<_> = [
         "aaaaa", "baaaa", "caaaa", "daaaa", "aaaab", "baaab", "caaab", "daaab",
     ].into_iter().map(|word| Word::new(word).unwrap()).collect();
@@ -447,13 +447,6 @@ fn decision_tree_researches_branches_that_need_non_candidate_probes() {
     for workers in [1, 10, 20] {
         let tree = super::solver::MinimaxSolver::new(workers, false)
             .decision_tree(&allowed, &candidates, 3).unwrap();
-        // The first opening works, but both of its three-target branches need
-        // a probe to fit the two guesses left. Building them must search again.
-        assert_eq!(tree.guess(), Some(candidates[0]));
-        for target in ["baaaa", "baaab"] {
-            let feedback = Result::from_guess(candidates[0], Word::new(target).unwrap());
-            assert_eq!(tree.after_result(feedback).unwrap().guess(), Some(probe));
-        }
         verify_decision_tree(&tree, &allowed, &candidates,
             &std::collections::HashSet::new(), 3);
     }
