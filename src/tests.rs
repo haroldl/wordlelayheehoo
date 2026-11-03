@@ -232,6 +232,19 @@ fn max_guesses_arguments_are_validated() {
 }
 
 #[test]
+fn progress_interval_accepts_seconds_and_zero_to_disable() {
+    let defaults = super::Args::try_parse_from(["wordlelayheehoo"]).unwrap();
+    assert_eq!(defaults.progress_interval, 5);
+    for seconds in ["0", "1", "30"] {
+        let args = super::Args::try_parse_from(["wordlelayheehoo", "--progress-interval", seconds]).unwrap();
+        assert_eq!(args.progress_interval, seconds.parse::<u64>().unwrap());
+    }
+    for seconds in ["-1", "0.5", "abc"] {
+        assert!(super::Args::try_parse_from(["wordlelayheehoo", "--progress-interval", seconds]).is_err());
+    }
+}
+
+#[test]
 fn cli_supports_help_and_version() {
     for (flag, kind) in [
         ("-h", clap::error::ErrorKind::DisplayHelp),
@@ -599,7 +612,7 @@ fn rejects_invalid_saved_tree_nodes() {
 fn load_tree_cli_accepts_output_and_rejects_search_options() {
     let args = super::Args::try_parse_from(["wordlelayheehoo", "--load-tree", "tree.json", "-o", "copy.json"]).unwrap();
     assert_eq!(args.load_tree.unwrap(), std::path::PathBuf::from("tree.json"));
-    for extra in [vec!["-w", "2"], vec!["--sample-percent", "10"], vec!["--max-guesses", "5"]] {
+    for extra in [vec!["-w", "2"], vec!["--sample-percent", "10"], vec!["--max-guesses", "5"], vec!["--progress-interval", "1"]] {
         assert!(super::Args::try_parse_from(
             ["wordlelayheehoo", "--load-tree", "tree.json"].into_iter().chain(extra)
         ).is_err());

@@ -4,10 +4,13 @@
 //! histories and are deliberately not merged.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::io::Write;
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use super::{Cancellation, DecisionTree, FeedbackGroups, HardModeHints, Job, Result,
-    Search, SearchOutcome, WordIndex};
+    Search, SearchOutcome, Word, WordIndex};
 
 // Limit speculative guesses per Result and the number of expanded Results.
 // Other Results run local DFS. Each expanded guess partitions one candidate
@@ -43,6 +46,7 @@ struct GuessNode {
     parent: ResultId,
     word: WordIndex,
     scope: Arc<Cancellation>,
+    partitioned: bool,
     required: HashSet<ResultId>,
     branches: HashMap<Result, DecisionTree>,
 }
@@ -61,6 +65,47 @@ enum Completion {
 }
 
 type Event = (Task, std::thread::Result<Completion>);
+
+struct OpeningProgress {
+    word: Word,
+    solved_results: usize,
+    total_results: Option<usize>,
+}
+
+struct ProgressSnapshot {
+    elapsed: Duration,
+    completed_tasks: u64,
+    running: usize,
+    workers: usize,
+    queued: usize,
+    rejected_openings: usize,
+    untried_openings: usize,
+    // None means the root is resolved and only cancelled work remains.
+    openings: Option<Vec<OpeningProgress>>,
+}
+
+impl fmt::Display for ProgressSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f,
+            "[{:.1}s] Search: {} tasks completed; {}/{} workers busy; {} queued",
+            self.elapsed.as_secs_f64(), self.completed_tasks, self.running, self.workers, self.queued,
+        )?;
+        if let Some(openings) = &self.openings {
+            write!(f, "; openings: {} rejected, {} untried", self.rejected_openings, self.untried_openings)?;
+            for opening in openings {
+                write!(f, "; {}: ", opening.word.as_str())?;
+                if let Some(total) = opening.total_results {
+                    write!(f, "{}/{} Results solved", opening.solved_results, total)?;
+                } else {
+                    write!(f, "partitioning")?;
+                }
+            }
+        } else {
+            write!(f, "; draining cancelled tasks")?;
+        }
+        Ok(())
+    }
+}
 
 pub(super) struct Scheduler<'a> {
     search: Arc<Search>,
@@ -81,6 +126,9 @@ pub(super) struct Scheduler<'a> {
     local_target_limit: usize,
     running: usize,
     outcome: Option<Option<DecisionTree>>,
+    progress_interval: Option<Duration>,
+    completed_tasks: u64,
+    rejected_openings: usize,
 }
 
 impl<'a> Scheduler<'a> {
@@ -122,13 +170,28 @@ impl<'a> Scheduler<'a> {
             max_expanded_results: workers.saturating_mul(EXPANDED_RESULTS_PER_WORKER),
             local_target_limit: LOCAL_TARGET_LIMIT,
             running: 0, outcome: None,
+            progress_interval: None, completed_tasks: 0, rejected_openings: 0,
         };
         scheduler.fill_guesses(root);
         scheduler
     }
 
-    pub(super) fn run(mut self) -> Option<DecisionTree> {
+    pub(super) fn with_progress_interval(mut self, interval: Option<Duration>) -> Self {
+        self.progress_interval = interval.filter(|interval| !interval.is_zero());
+        self
+    }
+
+    pub(super) fn run(self) -> Option<DecisionTree> {
+        self.run_with_reporter(|progress| {
+            // Diagnostics must not fail the search if stderr is closed.
+            let _ = writeln!(std::io::stderr().lock(), "{progress}");
+        })
+    }
+
+    fn run_with_reporter(mut self, mut report: impl FnMut(ProgressSnapshot)) -> Option<DecisionTree> {
         let mut panic = None;
+        let started = Instant::now();
+        let mut reported_at = started;
         loop {
             self.dispatch();
             if self.running == 0 {
@@ -137,8 +200,24 @@ impl<'a> Scheduler<'a> {
                 }
                 return self.outcome.take().expect("search has unfinished nodes but no work");
             }
-            let (task, completion) = self.events.recv().expect("worker failed to report completion");
+            let (task, completion) = if let Some(interval) = self.progress_interval {
+                // Check the deadline even with a continuous stream of events.
+                // A receive timeout also gives updates while a long DFS job
+                // is running and no worker has returned any new information.
+                if reported_at.elapsed() >= interval {
+                    report(self.progress_snapshot(started.elapsed()));
+                    reported_at = Instant::now();
+                }
+                match self.events.recv_timeout(interval.saturating_sub(reported_at.elapsed())) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => panic!("worker failed to report completion"),
+                }
+            } else {
+                self.events.recv().expect("worker failed to report completion")
+            };
             self.running -= 1;
+            self.completed_tasks += 1;
             match completion {
                 Ok(completion) if self.outcome.is_none() => self.complete(task, completion),
                 Err(payload) => {
@@ -155,6 +234,31 @@ impl<'a> Scheduler<'a> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn progress_snapshot(&self, elapsed: Duration) -> ProgressSnapshot {
+        let root = self.results.get(&self.root);
+        let openings = root.map(|root| {
+            let mut openings: Vec<_> = root.active.iter().map(|id| {
+                let node = &self.guesses[id];
+                OpeningProgress {
+                    word: self.search.words[node.word.0],
+                    solved_results: node.branches.len(),
+                    total_results: node.partitioned.then_some(node.branches.len() + node.required.len()),
+                }
+            }).collect();
+            openings.sort_unstable_by_key(|opening| opening.word);
+            openings
+        });
+        let queued = self.pending.iter().filter(|task| match task {
+            Task::Rank(id) | Task::Solve(id) => self.results.contains_key(id),
+            Task::Partition(id) => self.guesses.contains_key(id),
+        }).count();
+        ProgressSnapshot {
+            elapsed, completed_tasks: self.completed_tasks, running: self.running, workers: self.workers,
+            queued, rejected_openings: self.rejected_openings,
+            untried_openings: root.map_or(0, |root| root.choices.len()), openings,
         }
     }
 
@@ -233,6 +337,7 @@ impl<'a> Scheduler<'a> {
             self.next_guess += 1;
             self.guesses.insert(guess, GuessNode {
                 parent: id, word, scope: Cancellation::child(&node.scope),
+                partitioned: false,
                 required: HashSet::new(), branches: HashMap::new(),
             });
             node.active.insert(guess);
@@ -244,6 +349,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn add_required_results(&mut self, guess: GuessId, groups: FeedbackGroups) {
+        self.guesses.get_mut(&guess).unwrap().partitioned = true;
         let node = &self.guesses[&guess];
         let position = self.results[&node.parent].position.clone();
         let word = self.search.words[node.word.0];
@@ -302,6 +408,9 @@ impl<'a> Scheduler<'a> {
 
     fn finish_guess(&mut self, id: GuessId, solved: bool) {
         let node = self.remove_guess(id);
+        if !solved && node.parent == self.root {
+            self.rejected_openings += 1;
+        }
         self.results.get_mut(&node.parent).unwrap().active.remove(&id);
         if solved {
             let tree = DecisionTree::Guess {

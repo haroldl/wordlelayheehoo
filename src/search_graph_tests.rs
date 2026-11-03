@@ -216,3 +216,90 @@ fn worker_panic_cancels_and_drains_search_without_losing_pool_workers() {
     let one = [targets[0]];
     assert_eq!(pool.strategy_guesses(&one, &one, 1), Some(1));
 }
+
+#[test]
+fn progress_counts_proven_results_and_excludes_cancelled_queued_tasks() {
+    let mut pool = MinimaxSolver::new(4, false);
+    let mut graph = fixture(&mut pool, false);
+    let initial = graph.progress_snapshot(Duration::from_secs(5));
+    assert_eq!(initial.queued, 2);
+    assert_eq!(initial.rejected_openings, 0);
+    assert_eq!(initial.untried_openings, 6);
+    assert!(initial.to_string().contains("aaaaa: partitioning"));
+
+    let rejected = root_guesses(&graph)[0];
+    partition(&mut graph, rejected);
+    let snapshot = graph.progress_snapshot(Duration::from_secs(10));
+    let opening = snapshot.openings.as_ref().unwrap().iter()
+        .find(|opening| opening.word == Word::new("aaaaa").unwrap()).unwrap();
+    assert_eq!(opening.total_results, Some(4));
+    assert_eq!(opening.solved_results, 1); // All green is already solved.
+    assert!(snapshot.to_string().contains("aaaaa: 1/4 Results solved"));
+
+    let impossible = *graph.guesses[&rejected].required.iter().find(|id| {
+        let candidates = &graph.results[id].position.candidates;
+        candidates.len() == 3 && candidates.iter().all(|word| graph.search.words[word.0].as_bytes()[4] == b'b')
+    }).unwrap();
+    solve(&mut graph, impossible);
+    let snapshot = graph.progress_snapshot(Duration::from_secs(15));
+    assert_eq!(snapshot.rejected_openings, 1);
+    assert_eq!(snapshot.untried_openings, 5);
+    assert_eq!(snapshot.openings.as_ref().unwrap().len(), 2);
+    assert_eq!(snapshot.queued, 2);
+    assert!(graph.pending.len() > snapshot.queued, "cancelled IDs still await dispatch filtering");
+
+    // A late failure from the removed subtree must not reject another opening.
+    graph.complete(Task::Solve(impossible), Completion::Solved(SearchOutcome::Impossible));
+    assert_eq!(graph.progress_snapshot(Duration::ZERO).rejected_openings, 1);
+}
+
+#[test]
+fn progress_keeps_ticking_while_no_worker_completes_a_task() {
+    let mut pool = MinimaxSolver::new(1, false);
+    let (release, blocked) = mpsc::channel();
+    pool.sender.as_ref().unwrap().send(Box::new(move || {
+        // A timeout prevents a broken progress timer from hanging the test.
+        let _ = blocked.recv_timeout(Duration::from_secs(2));
+    })).unwrap();
+    let graph = fixture(&mut pool, true)
+        .with_progress_interval(Some(Duration::from_millis(5)));
+    let mut updates = Vec::new();
+    let tree = graph.run_with_reporter(|snapshot| {
+        updates.push(snapshot);
+        if updates.len() == 2 {
+            release.send(()).unwrap();
+        }
+    }).unwrap();
+    assert!(updates.len() >= 2);
+    for update in &updates[..2] {
+        assert_eq!(update.completed_tasks, 0);
+        assert_eq!(update.running, 1);
+        assert!(update.queued > 0);
+    }
+    assert!(updates[1].elapsed > updates[0].elapsed);
+    verify_targets(&tree);
+}
+
+#[test]
+fn progress_also_reports_completed_work_during_an_event_stream() {
+    let mut pool = MinimaxSolver::new(4, false);
+    let graph = fixture(&mut pool, true)
+        .with_progress_interval(Some(Duration::from_nanos(1)));
+    let mut updates = Vec::new();
+    let tree = graph.run_with_reporter(|snapshot| updates.push(snapshot)).unwrap();
+    assert!(updates.iter().any(|update| update.completed_tasks > 0));
+    assert!(updates.iter().all(|update| update.running <= update.workers));
+    assert!(updates.windows(2).all(|pair| pair[0].completed_tasks <= pair[1].completed_tasks));
+    verify_targets(&tree);
+}
+
+#[test]
+fn zero_progress_interval_disables_reporting() {
+    let mut pool = MinimaxSolver::new(1, false);
+    pool.sender.as_ref().unwrap().send(Box::new(|| {
+        std::thread::sleep(Duration::from_millis(10));
+    })).unwrap();
+    let graph = fixture(&mut pool, true).with_progress_interval(Some(Duration::ZERO));
+    let tree = graph.run_with_reporter(|_| panic!("disabled progress must not report")).unwrap();
+    verify_targets(&tree);
+}

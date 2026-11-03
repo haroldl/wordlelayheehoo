@@ -24,6 +24,10 @@ cargo run --release -- --sample-percent 10 -w 10 -o tree.json
 
 This selects a random 10% of the dictionary, searches using 10 workers, and saves the winning strategy to `tree.json` if one is found. The program reports the selected word count, opening word, and the strategy's worst-case total guesses.
 
+While searching, progress updates go to stderr every five seconds. They show elapsed search time, completed tasks, busy workers, queued tasks, rejected and untried openings, and how many reachable Results are proven solvable for each active opening. Cancelled queued tasks are excluded. Updates continue while workers are in long-running searches, even if no tasks finish between updates. Elapsed search time starts after the feedback table has been prepared.
+
+Task counts cover ranking, partitioning, and local DFS jobs; one DFS job may explore many branches. These counts and the per-opening Result counts do not estimate how much total search work remains. To change the update interval, add `--progress-interval 1` for one-second updates, or `--progress-interval 0` to disable them.
+
 To try a five-guess budget with the same sampling percentage and worker count:
 
 ```bash
@@ -51,9 +55,10 @@ Interaction is disabled by default, so building and saving a tree exits without 
 | `--max-guesses G` | `6` | Maximum guesses allowed to solve every selected target; must be positive. |
 | `--sample-percent PERCENT` | `100` | Percentage of dictionary entries used for both guesses and targets. Must be greater than 0 and at most 100; decimals are supported. |
 | `-w`, `--workers N` | `10` | Number of solver workers; must be positive. |
+| `--progress-interval SECONDS` | `5` | Whole seconds between search progress updates on stderr; `0` disables them. |
 | `--hard-mode` | `false` | Keep revealed green letters in position and reuse all green/gold letters in subsequent guesses, including revealed duplicate occurrences. Gold letters have no position restriction; grey letters impose no restrictions. |
 | `-o`, `--output FILE` | No file | Write the winning decision tree as indented JSON, replacing an existing file. |
-| `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit guess-budget, worker, sampling, and hard-mode options. |
+| `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit guess-budget, worker, sampling, hard-mode, and progress-interval options. |
 | `--interactive` | `false` | Prompt for feedback to solve a puzzle using the built or loaded tree. |
 | `-h`, `--help` | | Show command-line help. |
 

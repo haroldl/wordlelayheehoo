@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crate::words::{LetterResult, Result, Word};
 
@@ -176,6 +177,7 @@ pub struct MinimaxSolver {
     workers: Vec<JoinHandle<()>>,
     feedback: Option<Arc<FeedbackTable>>,
     hard_mode: bool,
+    progress_interval: Option<Duration>,
 }
 
 impl MinimaxSolver {
@@ -201,7 +203,14 @@ impl MinimaxSolver {
                     .expect("failed to start minimax worker")
             })
             .collect();
-        Self { sender: Some(sender), workers, feedback: None, hard_mode }
+        Self { sender: Some(sender), workers, feedback: None, hard_mode, progress_interval: None }
+    }
+
+    /// Enable periodic search diagnostics on stderr; zero disables them.
+    /// Solvers are silent by default. The CLI enables five-second updates.
+    pub fn with_progress_interval(mut self, interval: Duration) -> Self {
+        self.progress_interval = (!interval.is_zero()).then_some(interval);
+        self
     }
 
     /// Reuse the table when the allowed words are reordered or narrowed.
@@ -253,7 +262,7 @@ impl MinimaxSolver {
         search_graph::Scheduler::new(
             search, candidates, max_depth, self.hard_mode.then(HardModeHints::default),
             self.sender.as_ref().unwrap(), self.workers.len(),
-        ).run()
+        ).with_progress_interval(self.progress_interval).run()
     }
 
     fn prepare(
