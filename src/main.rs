@@ -41,10 +41,6 @@ struct Args {
     )]
     workers: NonZeroUsize,
 
-    /// Seconds between search progress updates on stderr (0 disables updates)
-    #[arg(long, value_name = "SECONDS", default_value_t = 5)]
-    progress_interval: u64,
-
     /// Random percentage of WORDS used for both guesses and targets (0 < P <= 100)
     #[arg(long, value_name = "PERCENT", default_value = "100",
         value_parser = sampling::parse_percent)]
@@ -55,7 +51,7 @@ struct Args {
     output: Option<std::path::PathBuf>,
 
     /// Load a saved JSON decision tree instead of running the solver
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["sample_percent", "workers", "hard_mode", "max_guesses", "progress_interval"])]
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["sample_percent", "workers", "hard_mode", "max_guesses"])]
     load_tree: Option<std::path::PathBuf>,
 
     /// Interactively solve a puzzle using the built or loaded decision tree
@@ -90,7 +86,6 @@ fn main() -> std::io::Result<()> {
         println!("Using {} words ({}%) as both guesses and targets.", words.len(), args.sample_percent);
         println!("Searching from an empty game state with a {max_guesses}-guess budget.");
         solver::MinimaxSolver::new(workers, args.hard_mode)
-            .with_progress_interval(std::time::Duration::from_secs(args.progress_interval))
             .decision_tree(&words, &words, max_guesses)
     };
 

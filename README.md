@@ -4,15 +4,7 @@ A Wordle strategy solver in Rust. Starting from an empty game state, it searches
 
 Cargo processes `WORD.LST` at build time, keeping five-letter ASCII words and normalizing them to lowercase. The resulting `WORDS` dictionary is embedded in the executable and supplies both allowed guesses and possible targets.
 
-## Search and memory
-
-Workers take both opening and deeper search tasks from a shared queue. A coordinator owns a bipartite graph of guessed words and feedback Results: a Result needs any one winning next guess, while a guess needs a solution for every reachable Result. Workers return completed work without waiting for child tasks, so even a single worker can process the graph.
-
-Once a guess is proven, competing guesses and their descendants are cancelled. If any Result is impossible, its guess is rejected and that guess's other Result branches are cancelled. Cancellation removes queued work before dispatch, cooperatively stops running work, and ignores late completions. Successful subtrees are retained and assembled directly into the output tree, without a second search. Hard-mode hints follow each branch's history.
-
-The parallel frontier is bounded: at most two guesses compete per expanded Result, and at most twice the worker count of Results are expanded at once, including the initial state. Result groups with at most 16 targets, groups whose targets can simply be guessed within the budget, and groups beyond the frontier limit use local depth-first search. Search memory depends on the vocabulary, worker count, depth budget, and retained strategy branches rather than the total number of states explored. There is no state cache. More workers increase temporary search memory, and difficult or impossible searches can take substantially longer without memoization.
-
-The solver uses the full budget and accepts the first proven strategy; it does not increase the budget through iterative deepening or minimize the strategy's length. Openings are tried in candidate-first order. Deeper guesses are ordered by largest feedback group, then sum of squared group sizes. Worker scheduling can change which strategy is found first. Workers also share a precomputed feedback table using one byte per allowed guess–target pair (about 72 MiB for the full dictionary).
+Workers test opening guesses in parallel and share an in-memory cache of proven subproblems and winning guesses. Once a strategy is found, the decision tree is reconstructed from those saved results without repeating the search. Cache keys include the remaining targets, remaining guess budget, and hard-mode hints. Workers also share a precomputed feedback table. Retaining search results trades memory for avoiding repeated computation.
 
 ## Run
 
@@ -24,11 +16,7 @@ cargo run --release -- --sample-percent 10 -w 10 -o tree.json
 
 This selects a random 10% of the dictionary, searches using 10 workers, and saves the winning strategy to `tree.json` if one is found. The program reports the selected word count, opening word, and the strategy's worst-case total guesses.
 
-While searching, progress updates go to stderr every five seconds. They show elapsed search time, completed tasks, busy workers, queued tasks, rejected and untried openings, and how many reachable Results are proven solvable for each active opening. Cancelled queued tasks are excluded. Updates continue while workers are in long-running searches, even if no tasks finish between updates. Elapsed search time starts after the feedback table has been prepared.
-
-Task counts cover ranking, partitioning, and local DFS jobs; one DFS job may explore many branches. These counts and the per-opening Result counts do not estimate how much total search work remains. To change the update interval, add `--progress-interval 1` for one-second updates, or `--progress-interval 0` to disable them.
-
-To try a five-guess budget with the same sampling percentage and worker count:
+To search with a five-guess budget:
 
 ```bash
 cargo run --release -- --max-guesses 5 --sample-percent 10 -w 10 -o tree.json
@@ -55,10 +43,9 @@ Interaction is disabled by default, so building and saving a tree exits without 
 | `--max-guesses G` | `6` | Maximum guesses allowed to solve every selected target; must be positive. |
 | `--sample-percent PERCENT` | `100` | Percentage of dictionary entries used for both guesses and targets. Must be greater than 0 and at most 100; decimals are supported. |
 | `-w`, `--workers N` | `10` | Number of solver workers; must be positive. |
-| `--progress-interval SECONDS` | `5` | Whole seconds between search progress updates on stderr; `0` disables them. |
 | `--hard-mode` | `false` | Keep revealed green letters in position and reuse all green/gold letters in subsequent guesses, including revealed duplicate occurrences. Gold letters have no position restriction; grey letters impose no restrictions. |
 | `-o`, `--output FILE` | No file | Write the winning decision tree as indented JSON, replacing an existing file. |
-| `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit guess-budget, worker, sampling, hard-mode, and progress-interval options. |
+| `--load-tree FILE` | No file | Load a saved strategy instead of searching. Conflicts with explicit guess-budget, worker, sampling, and hard-mode options. |
 | `--interactive` | `false` | Prompt for feedback to solve a puzzle using the built or loaded tree. |
 | `-h`, `--help` | | Show command-line help. |
 

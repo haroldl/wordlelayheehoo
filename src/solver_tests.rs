@@ -30,20 +30,19 @@ fn hard_mode_keeps_greens_and_counts_revealed_duplicates() {
 }
 
 #[test]
-fn hard_mode_feasibility_distinguishes_histories_with_identical_candidates() {
+fn hard_mode_memo_distinguishes_histories_with_identical_candidates() {
     use super::HardModeHints;
     use crate::{Result, Word};
-    use super::{Cancellation, SearchOutcome};
+    use std::sync::atomic::AtomicBool;
     let words: Vec<_> = ["baste", "caste", "haste", "paste", "taste", "bchpt"]
         .into_iter().map(|word| Word::new(word).unwrap()).collect();
     let mut solver = MinimaxSolver::new(1, true);
-    let (search, candidates) = solver.prepare(&words, &words[..5]).unwrap();
-    let stop = Cancellation::default();
+    let (search, candidates, _) = solver.prove(&words, &words[..5], 5).unwrap();
+    let stop = AtomicBool::new(false);
     let empty = Some(HardModeHints::default());
     // With no clues, the non-candidate probe distinguishes every target.
-    let SearchOutcome::Solved(tree) = search.solve(&candidates, 2, empty, &stop) else {
-        panic!("probe must solve this state");
-    };
+    assert_eq!(search.can_solve(&candidates, 2, empty, &stop), Some(true));
+    let tree = search.build_tree(&candidates, 2, empty);
     assert_eq!(tree.guess(), Word::new("bchpt"));
 
     // After waste -> _****, only candidates meet the clues. Every miss
@@ -51,59 +50,50 @@ fn hard_mode_feasibility_distinguishes_histories_with_identical_candidates() {
     let previous = Word::new("waste").unwrap();
     let hints = Some(HardModeHints::default().after_feedback(previous,
         Result::from_guess(previous, words[0])));
-    assert_eq!(search.solve(&candidates, 2, hints, &stop), SearchOutcome::Impossible);
-    assert_eq!(search.solve(&candidates, 4, hints, &stop), SearchOutcome::Impossible);
-    assert!(matches!(search.solve(&candidates, 5, hints, &stop), SearchOutcome::Solved(_)));
-    assert!(matches!(search.solve(&candidates, 2, empty, &stop), SearchOutcome::Solved(_)));
+    assert_eq!(search.can_solve(&candidates, 2, hints, &stop), Some(false));
+    assert_eq!(search.can_solve(&candidates, 4, hints, &stop), Some(false));
+    assert_eq!(search.can_solve(&candidates, 5, hints, &stop), Some(true));
+    assert_eq!(search.can_solve(&candidates, 2, empty, &stop), Some(true));
 }
 
 #[test]
-fn cancelled_search_is_not_reported_as_failure() {
-    use super::{Cancellation, SearchOutcome};
-    let words: Vec<_> = ["aaaaa", "baaaa", "caaaa", "daaaa", "bcddd"]
-        .into_iter().map(|word| crate::Word::new(word).unwrap()).collect();
-    let mut solver = MinimaxSolver::new(1, false);
-    let (search, candidates) = solver.prepare(&words, &words[..4]).unwrap();
-    let stop = Cancellation::default();
-    stop.cancel();
-    for depth in [1, 2] {
-        assert_eq!(search.solve(&candidates, depth, None, &stop), SearchOutcome::Cancelled);
-    }
-    let stop = Cancellation::default();
-    assert_eq!(search.solve(&candidates, 1, None, &stop), SearchOutcome::Impossible);
-    assert!(matches!(search.solve(&candidates, 2, None, &stop), SearchOutcome::Solved(_)));
-}
+fn memo_distinguishes_guess_budgets_and_reconstructs_saved_proofs() {
+    use super::GameState;
+    use crate::Word;
+    use std::sync::atomic::AtomicBool;
 
-#[test]
-fn local_search_retains_winning_non_candidate_probes() {
-    use super::{Cancellation, SearchOutcome};
-    use crate::{DecisionTree, Result, Word};
     let targets: Vec<_> = [
         "aaaaa", "baaaa", "caaaa", "daaaa", "aaaab", "baaab", "caaab", "daaab",
     ].into_iter().map(|word| Word::new(word).unwrap()).collect();
-    let probe = Word::new("bcddd").unwrap();
     let mut allowed = targets.clone();
-    allowed.push(probe);
-    let mut pool = MinimaxSolver::new(1, false);
-    let (search, candidates) = pool.prepare(&allowed, &targets).unwrap();
-    let opening = super::WordIndex(search.words.binary_search(&targets[0]).unwrap());
-    let SearchOutcome::Solved(tree) = search.solve_guess(
-        &candidates, 3, None, opening, &Cancellation::default(),
-    ) else { panic!("opening must work") };
-    for target in ["baaaa", "baaab"] {
-        let feedback = Result::from_guess(targets[0], Word::new(target).unwrap());
-        assert_eq!(tree.after_result(feedback).unwrap().guess(), Some(probe));
-    }
-    for target in targets {
-        let mut node = &tree;
-        let mut played = HashSet::new();
-        while let Some(guess) = node.guess() {
-            assert!(played.insert(guess));
-            assert!(played.len() <= 3);
-            node = node.after_result(Result::from_guess(guess, target)).unwrap();
+    allowed.push(Word::new("bcddd").unwrap());
+    for hard_mode in [false, true] {
+        let mut solver = MinimaxSolver::new(1, hard_mode);
+        // This budget takes the sequential shortcut so we can test both
+        // smaller budgets against the same initially empty search cache.
+        let (search, candidates, _) = solver.prove(&allowed, &targets, targets.len()).unwrap();
+        let hints = hard_mode.then(super::HardModeHints::default);
+        let stop = AtomicBool::new(false);
+        assert_eq!(search.can_solve(&candidates, 2, hints, &stop), Some(false));
+        assert_eq!(search.can_solve(&candidates, 3, hints, &stop), Some(true));
+        let proofs = search.memo.lock().unwrap().clone();
+        let state = |depth| GameState { candidates: candidates.to_vec(), depth, hints };
+        assert_eq!(proofs.get(&state(2)), Some(&None));
+        assert!(proofs.get(&state(3)).unwrap().is_some());
+
+        let tree = search.build_tree(&candidates, 3, hints);
+        assert_eq!(tree.worst_case_guesses(), 3);
+        assert_eq!(*search.memo.lock().unwrap(), proofs);
+        for target in &targets {
+            let mut node = &tree;
+            let mut played = HashSet::new();
+            while let Some(guess) = node.guess() {
+                assert!(played.insert(guess));
+                assert!(played.len() <= 3);
+                node = node.after_result(crate::Result::from_guess(guess, *target)).unwrap();
+            }
+            assert!(played.contains(target));
         }
-        assert_eq!(node, &DecisionTree::Solved);
-        assert!(played.contains(&target));
     }
 }
 

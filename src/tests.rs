@@ -1,5 +1,5 @@
 use clap::Parser;
-use super::{DEFAULT_MAX_GUESSES, LetterResult, Result, Word, WORDS};
+use super::{LetterResult, DEFAULT_MAX_GUESSES, Result, Word, WORDS};
 use LetterResult::{Gold, Green, Grey};
 
 // Fixed vocabulary for solver tests; independent of the production WORD.LST.
@@ -139,7 +139,7 @@ fn minimax_can_use_a_non_candidate_probe() {
 
 // Independent exhaustive recurrence for tiny dictionaries, with no memoization,
 // depth feasibility search, ranking, or capacity pruning.
-pub(crate) fn exhaustive_minimax(allowed: &[Word], candidates: &[Word]) -> usize {
+fn exhaustive_minimax(allowed: &[Word], candidates: &[Word]) -> usize {
     let mut best = candidates.len();
     for &guess in allowed {
         let mut groups: std::collections::HashMap<Result, Vec<Word>> =
@@ -217,31 +217,18 @@ fn worker_count_arguments_are_validated() {
 fn max_guesses_arguments_are_validated() {
     let defaults = super::Args::try_parse_from(["wordlelayheehoo"]).unwrap();
     assert_eq!(defaults.max_guesses.get(), DEFAULT_MAX_GUESSES);
-    for value in ["1", "5", "6", "10"] {
+    for value in ["1", "2", "5", "6", "10"] {
         let args = super::Args::try_parse_from(
             ["wordlelayheehoo", "--max-guesses", value]
         ).unwrap();
         assert_eq!(args.max_guesses.get(), value.parse::<usize>().unwrap());
     }
-    for value in ["0", "-1", "abc", "1.5"] {
+    for value in ["0", "-1", "abc", "1.5", "18446744073709551616"] {
         assert!(super::Args::try_parse_from(
             ["wordlelayheehoo", "--max-guesses", value]
         ).is_err());
     }
     assert!(super::Args::try_parse_from(["wordlelayheehoo", "--max-guesses"]).is_err());
-}
-
-#[test]
-fn progress_interval_accepts_seconds_and_zero_to_disable() {
-    let defaults = super::Args::try_parse_from(["wordlelayheehoo"]).unwrap();
-    assert_eq!(defaults.progress_interval, 5);
-    for seconds in ["0", "1", "30"] {
-        let args = super::Args::try_parse_from(["wordlelayheehoo", "--progress-interval", seconds]).unwrap();
-        assert_eq!(args.progress_interval, seconds.parse::<u64>().unwrap());
-    }
-    for seconds in ["-1", "0.5", "abc"] {
-        assert!(super::Args::try_parse_from(["wordlelayheehoo", "--progress-interval", seconds]).is_err());
-    }
 }
 
 #[test]
@@ -284,7 +271,7 @@ fn meets_hard_mode_feedback(guess: Word, previous: Word, feedback: Result) -> bo
     true
 }
 
-pub(crate) fn exhaustive_hard_mode(allowed: &[Word], candidates: &[Word]) -> usize {
+fn exhaustive_hard_mode(allowed: &[Word], candidates: &[Word]) -> usize {
     let mut best = candidates.len();
     for &guess in allowed {
         let mut groups: std::collections::HashMap<Result, Vec<Word>> =
@@ -307,7 +294,7 @@ pub(crate) fn exhaustive_hard_mode(allowed: &[Word], candidates: &[Word]) -> usi
     best
 }
 
-pub(crate) fn verify_hard_mode_tree(tree: &super::DecisionTree, history: &mut Vec<(Word, Result)>) {
+fn verify_hard_mode_tree(tree: &super::DecisionTree, history: &mut Vec<(Word, Result)>) {
     if let super::DecisionTree::Guess { word, branches } = tree {
         for &(previous, feedback) in history.iter() {
             assert!(meets_hard_mode_feedback(*word, previous, feedback),
@@ -374,9 +361,9 @@ fn queued_minimax_matches_exhaustive_search_with_one_ten_and_twenty_workers() {
 }
 
 #[test]
-fn queued_minimax_exhausts_alternatives_without_a_winning_strategy() {
+fn queued_minimax_exhausts_multiple_batches_without_a_winning_strategy() {
     // A shared suffix makes each missed candidate eliminate only itself.
-    // All opening guesses must fail before impossibility can be reported.
+    // More than 16 words forces work into multiple queue jobs.
     let words: Vec<_> = (b'a'..=b't').map(|letter| Word::new(&format!("{}zzzz", char::from(letter))).unwrap()).collect();
     for workers in [1, 10, 20] {
         let mut solver = super::solver::MinimaxSolver::new(workers, false);
@@ -385,7 +372,7 @@ fn queued_minimax_exhausts_alternatives_without_a_winning_strategy() {
     }
 }
 
-pub(crate) fn verify_decision_tree(
+fn verify_decision_tree(
     tree: &super::DecisionTree,
     allowed: &[Word],
     candidates: &[Word],
@@ -447,22 +434,6 @@ fn decision_tree_includes_non_candidate_probe_and_final_correct_guess() {
     assert_eq!(tree.guess(), Some(probe));
     assert_eq!(tree.after_result(Result::ALL_GREEN), None);
     verify_decision_tree(&tree, &allowed, &candidates, &std::collections::HashSet::new(), 2);
-}
-
-#[test]
-fn decision_tree_retains_branches_that_need_non_candidate_probes() {
-    let candidates: Vec<_> = [
-        "aaaaa", "baaaa", "caaaa", "daaaa", "aaaab", "baaab", "caaab", "daaab",
-    ].into_iter().map(|word| Word::new(word).unwrap()).collect();
-    let probe = Word::new("bcddd").unwrap();
-    let mut allowed = candidates.clone();
-    allowed.push(probe);
-    for workers in [1, 10, 20] {
-        let tree = super::solver::MinimaxSolver::new(workers, false)
-            .decision_tree(&allowed, &candidates, 3).unwrap();
-        verify_decision_tree(&tree, &allowed, &candidates,
-            &std::collections::HashSet::new(), 3);
-    }
 }
 
 #[test]
@@ -612,7 +583,8 @@ fn rejects_invalid_saved_tree_nodes() {
 fn load_tree_cli_accepts_output_and_rejects_search_options() {
     let args = super::Args::try_parse_from(["wordlelayheehoo", "--load-tree", "tree.json", "-o", "copy.json"]).unwrap();
     assert_eq!(args.load_tree.unwrap(), std::path::PathBuf::from("tree.json"));
-    for extra in [vec!["-w", "2"], vec!["--sample-percent", "10"], vec!["--max-guesses", "5"], vec!["--progress-interval", "1"]] {
+    for extra in [vec!["-w", "2"], vec!["--sample-percent", "10"],
+        vec!["--max-guesses", "5"], vec!["--max-guesses", "6"]] {
         assert!(super::Args::try_parse_from(
             ["wordlelayheehoo", "--load-tree", "tree.json"].into_iter().chain(extra)
         ).is_err());

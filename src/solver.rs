@@ -1,59 +1,21 @@
-//! Bounded parallel strategy search over alternating guess and feedback nodes.
-//! A feedback node needs one winning next guess; a guess node needs a solution
-//! for every reachable feedback Result. The coordinator owns that graph and
-//! cancels losing subtrees. Workers never wait for child jobs in their pool.
-//! A bounded frontier exposes deeper work; small subproblems use local DFS.
-//! Successful searches retain their decision trees instead of searching again.
+//! Bounded strategy search with a reusable, fixed-size worker pool.
+//! Using the full remaining budget, queued jobs evaluate proposed first guesses.
+//! The first proven winning strategy is accepted without iterative deepening.
+//! Each job searches its feedback subtrees recursively; workers share proven
+//! subproblem results and cached guess–target feedback. The feedback table
+//! persists across searches in the same pool; each allocated pair uses one byte. Workers never wait for jobs in their own pool, avoiding
+//! nested-pool deadlocks and limiting total concurrency to the configured count.
+//! Previously guessed words are excluded on entry. Deeper repeated guesses give
+//! one non-winning group with every candidate and are rejected as no progress.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use crate::words::{LetterResult, Result, Word};
 
-#[path = "search_graph.rs"]
-mod search_graph;
-
-/// Cancellation follows the search ancestry, without affecting other guesses
-/// or required feedback branches outside the cancelled subtree.
-#[derive(Default)]
-struct Cancellation {
-    stopped: AtomicBool,
-    parent: Option<Arc<Self>>,
-}
-
-impl Cancellation {
-    fn child(parent: &Arc<Self>) -> Arc<Self> {
-        Arc::new(Self { stopped: AtomicBool::new(false), parent: Some(Arc::clone(parent)) })
-    }
-
-    fn cancel(&self) {
-        self.stopped.store(true, Ordering::Relaxed);
-    }
-
-    fn is_cancelled(&self) -> bool {
-        let mut scope = Some(self);
-        while let Some(current) = scope {
-            if current.stopped.load(Ordering::Relaxed) {
-                return true;
-            }
-            scope = current.parent.as_deref();
-        }
-        false
-    }
-}
-
-/// Cancellation is deliberately distinct from a proof of impossibility.
-#[derive(Debug, PartialEq, Eq)]
-enum SearchOutcome<T> {
-    Solved(T),
-    Impossible,
-    Cancelled,
-}
-
-type FeedbackGroups = Vec<(Result, Vec<WordIndex>)>;
+const GUESSES_PER_JOB: usize = 16;
 
 /// Position in one Search's sorted, deduplicated list of allowed words.
 /// This is not an index into the global WORDS dictionary, nor is it portable
@@ -61,6 +23,15 @@ type FeedbackGroups = Vec<(Result, Vec<WordIndex>)>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 struct WordIndex(usize);
+
+/// Remaining targets, depth budget, and branch-specific hard-mode hints.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GameState {
+    candidates: Vec<WordIndex>,
+    /// Remaining depth budget, not this state's depth in the overall tree.
+    depth: usize,
+    hints: Option<HardModeHints>,
+}
 
 /// Only positive feedback constrains hard-mode guesses. Gold letters may stay
 /// in the same position; grey letters impose no exclusions or upper counts.
@@ -170,14 +141,13 @@ impl DecisionTree {
     }
 }
 
-/// Reusable worker pool. A per-search coordinator schedules both opening and
-/// deeper subproblems, keeping workers free to execute rather than await jobs.
+/// Reusable minimax worker pool. Each search distributes opening guesses across
+/// the pool; recursive searches run within those jobs without nested pools.
 pub struct MinimaxSolver {
     sender: Option<mpsc::Sender<Job>>,
     workers: Vec<JoinHandle<()>>,
     feedback: Option<Arc<FeedbackTable>>,
     hard_mode: bool,
-    progress_interval: Option<Duration>,
 }
 
 impl MinimaxSolver {
@@ -203,14 +173,7 @@ impl MinimaxSolver {
                     .expect("failed to start minimax worker")
             })
             .collect();
-        Self { sender: Some(sender), workers, feedback: None, hard_mode, progress_interval: None }
-    }
-
-    /// Enable periodic search diagnostics on stderr; zero disables them.
-    /// Solvers are silent by default. The CLI enables five-second updates.
-    pub fn with_progress_interval(mut self, interval: Duration) -> Self {
-        self.progress_interval = (!interval.is_zero()).then_some(interval);
-        self
+        Self { sender: Some(sender), workers, feedback: None, hard_mode }
     }
 
     /// Reuse the table when the allowed words are reordered or narrowed.
@@ -247,29 +210,25 @@ impl MinimaxSolver {
             .map(|tree| tree.worst_case_guesses())
     }
 
-    /// Accepts the first proven strategy within max_depth, retaining its tree.
-    /// Worker schedules may select different strategies; length is not minimized.
+    /// Finds a strategy within max_depth and reconstructs it from saved proofs.
+    /// Accepts the first success; worker schedules may select different strategies.
+    /// Does not search smaller budgets to minimize the strategy's length.
     pub fn decision_tree(
         &mut self,
         allowed: &[Word],
         candidates: &[Word],
         max_depth: usize,
     ) -> Option<DecisionTree> {
-        let (search, candidates) = self.prepare(allowed, candidates)?;
-        if max_depth == 0 || candidates.len() > capacity(max_depth) {
-            return None;
-        }
-        search_graph::Scheduler::new(
-            search, candidates, max_depth, self.hard_mode.then(HardModeHints::default),
-            self.sender.as_ref().unwrap(), self.workers.len(),
-        ).with_progress_interval(self.progress_interval).run()
+        let (search, candidates, depth) = self.prove(allowed, candidates, max_depth)?;
+        Some(search.build_tree(&candidates, depth, self.hard_mode.then(HardModeHints::default)))
     }
 
-    fn prepare(
+    fn prove(
         &mut self,
         allowed: &[Word],
         candidates: &[Word],
-    ) -> Option<(Arc<Search>, Arc<Vec<WordIndex>>)> {
+        max_depth: usize,
+    ) -> Option<(Arc<Search>, Arc<Vec<WordIndex>>, usize)> {
         let mut words = allowed.to_vec();
         words.sort_unstable();
         words.dedup();
@@ -281,11 +240,75 @@ impl MinimaxSolver {
         if candidates.is_empty() {
             return None;
         }
+
         let feedback = self.feedback_table(&words);
         let feedback_indices = words.iter()
             .map(|word| FeedbackWordIndex(feedback.words.binary_search(word).unwrap())).collect();
-        let search = Arc::new(Search { words, feedback, feedback_indices });
-        Some((search, Arc::new(candidates)))
+        let search = Arc::new(Search {
+            words, feedback, feedback_indices, memo: Mutex::new(HashMap::new()),
+        });
+        let candidates = Arc::new(candidates);
+        // Try candidate guesses first, but retain every allowed probe word.
+        let guesses: Vec<_> = candidates.iter().copied().chain(
+            (0..search.words.len()).map(WordIndex).filter(|guess| candidates.binary_search(guess).is_err())
+        ).collect();
+
+        let depth = max_depth;
+        let hints = self.hard_mode.then(HardModeHints::default);
+        if candidates.len() <= depth {
+            return Some((search, candidates, depth));
+        }
+        if depth <= 1 || candidates.len() > capacity(depth) {
+            return None;
+        }
+        let found = Arc::new(AtomicBool::new(false));
+        let (completed, results) = mpsc::channel();
+        let mut submitted = 0;
+        for batch in guesses.chunks(GUESSES_PER_JOB) {
+            let batch = batch.to_vec();
+            let search = Arc::clone(&search);
+            let candidates = Arc::clone(&candidates);
+            let found = Arc::clone(&found);
+            let completed = completed.clone();
+            self.sender.as_ref().unwrap().send(Box::new(move || {
+                // Report panics to the caller without silently losing a worker
+                // or leaving the caller waiting forever for job completion.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for guess in batch {
+                        if found.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if search.guess_works(&candidates, depth, hints, guess, &found) == Some(true) {
+                            let state = GameState { candidates: candidates.to_vec(), depth, hints };
+                            search.memo.lock().unwrap().insert(state, Some(guess));
+                            found.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }));
+                if outcome.is_err() {
+                    found.store(true, Ordering::Relaxed);
+                }
+                let _ = completed.send(outcome);
+            })).expect("minimax worker queue disconnected");
+            submitted += 1;
+        }
+        drop(completed);
+        let mut panic = None;
+        // Drain every job before returning. In-flight
+        // branches check found cooperatively; queued batches skip their work.
+        for _ in 0..submitted {
+            if let Err(payload) = results.recv().expect("minimax job failed to report") {
+                panic = Some(payload);
+            }
+        }
+        if let Some(payload) = panic {
+            std::panic::resume_unwind(payload);
+        }
+        if found.load(Ordering::Relaxed) {
+            return Some((search, candidates, depth));
+        }
+        None
     }
 }
 
@@ -309,107 +332,106 @@ struct Search {
     feedback: Arc<FeedbackTable>,
     // Indexed by WordIndex; values refer to the shared feedback vocabulary.
     feedback_indices: Vec<FeedbackWordIndex>,
+    // Locks cover lookups and inserts only, never scoring or recursive search.
+    // Value: Some(guess) is a complete winning proof; None is a proven failure.
+    memo: Mutex<HashMap<GameState, Option<WordIndex>>>,
 }
 
 impl Search {
+    /// Replays recorded guesses without running minimax again. The sequential
+    /// candidate shortcut also has a constructive proof: guess a candidate and
+    /// continue on its smaller feedback groups until the target is hit.
+    fn build_tree(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>) -> DecisionTree {
+        assert!(depth > 0 && !candidates.is_empty());
+        let guess = if candidates.len() <= depth {
+            candidates[0]
+        } else {
+            let state = GameState { candidates: candidates.to_vec(), depth, hints };
+            self.memo.lock().unwrap().get(&state)
+                .copied().flatten().expect("successful search must retain a winning guess")
+        };
+        let word = self.words[guess.0];
+        let mut groups: HashMap<Result, Vec<WordIndex>> = HashMap::new();
+        for &target in candidates {
+            groups.entry(self.pattern(guess, target))
+                .or_default().push(target);
+        }
+        let branches = groups.into_iter().map(|(result, group)| {
+            let next = if result == Result::ALL_GREEN {
+                DecisionTree::Solved
+            } else {
+                self.build_tree(&group, depth - 1, hints.map(|hints| hints.after_feedback(word, result)))
+            };
+            (result, next)
+        }).collect();
+        DecisionTree::Guess { word, branches }
+    }
+
     fn pattern(&self, guess: WordIndex, target: WordIndex) -> Result {
         self.feedback.pattern(self.feedback_indices[guess.0], self.feedback_indices[target.0])
     }
 
-    /// Partition a guess into required feedback branches, checking cheap bounds
-    /// before any descendants are scheduled. Largest groups are tried first.
-    fn partition(&self, candidates: &[WordIndex], depth: usize, guess: WordIndex, stop: &Cancellation) -> SearchOutcome<FeedbackGroups> {
-        if stop.is_cancelled() {
-            return SearchOutcome::Cancelled;
+    // A guess_works if we can_solve for all of the possible Result patterns we might get back if we guess this word.
+    // Mutually recursive with can_solve.
+    fn guess_works(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, guess: WordIndex, stop: &AtomicBool) -> Option<bool> {
+        if stop.load(Ordering::Relaxed) {
+            return None;
         }
-        if depth == 0 {
-            return SearchOutcome::Impossible;
-        }
-        let mut groups = vec![Vec::new(); Result::COUNT];
+
+        // Add the word index for each possible target word into `groups` at the index that represents the Result
+        // pattern we get for guessing the guess word.
+        let mut groups: Vec<Vec<WordIndex>> = vec![Vec::new(); Result::COUNT];
         let limit = capacity(depth - 1);
         for &target in candidates {
-            if stop.is_cancelled() {
-                return SearchOutcome::Cancelled;
+            if stop.load(Ordering::Relaxed) {
+                return None;
             }
             let pattern = self.pattern(guess, target);
-            let group = &mut groups[pattern.index()];
-            group.push(target);
-            if pattern != Result::ALL_GREEN
-                && (group.len() > limit || group.len() == candidates.len())
-            {
-                return SearchOutcome::Impossible;
-            }
-        }
-        let mut groups: FeedbackGroups = groups.into_iter().filter(|group| !group.is_empty())
-            .map(|group| (self.pattern(guess, group[0]), group)).collect();
-        groups.sort_unstable_by_key(|(_, group)| std::cmp::Reverse(group.len()));
-        SearchOutcome::Solved(groups)
-    }
-
-    /// Local DFS retains only successful choices, including their witnesses.
-    fn solve(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, stop: &Cancellation) -> SearchOutcome<DecisionTree> {
-        let guesses = match self.rank_guesses(candidates, depth, hints, stop) {
-            SearchOutcome::Solved(guesses) => guesses,
-            SearchOutcome::Impossible => return SearchOutcome::Impossible,
-            SearchOutcome::Cancelled => return SearchOutcome::Cancelled,
-        };
-        for guess in guesses {
-            match self.solve_guess(candidates, depth, hints, guess, stop) {
-                SearchOutcome::Impossible => continue,
-                outcome => return outcome,
-            }
-        }
-        SearchOutcome::Impossible
-    }
-
-    fn solve_guess(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, guess: WordIndex, stop: &Cancellation) -> SearchOutcome<DecisionTree> {
-        let groups = match self.partition(candidates, depth, guess, stop) {
-            SearchOutcome::Solved(groups) => groups,
-            SearchOutcome::Impossible => return SearchOutcome::Impossible,
-            SearchOutcome::Cancelled => return SearchOutcome::Cancelled,
-        };
-        let word = self.words[guess.0];
-        let mut branches = HashMap::new();
-        for (result, group) in groups {
-            if stop.is_cancelled() {
-                return SearchOutcome::Cancelled;
-            }
-            let tree = if result == Result::ALL_GREEN {
-                DecisionTree::Solved
-            } else {
-                let hints = hints.map(|hints| hints.after_feedback(word, result));
-                match self.solve(&group, depth - 1, hints, stop) {
-                    SearchOutcome::Solved(tree) => tree,
-                    SearchOutcome::Impossible => return SearchOutcome::Impossible,
-                    SearchOutcome::Cancelled => return SearchOutcome::Cancelled,
+            if pattern != Result::ALL_GREEN {
+                groups[pattern.index()].push(target);
+                if groups[pattern.index()].len() > limit || groups[pattern.index()].len() == candidates.len() {
+                    return Some(false);
                 }
-            };
-            branches.insert(result, tree);
+            }
         }
-        SearchOutcome::Solved(DecisionTree::Guess { word, branches })
+        groups.retain(|group| !group.is_empty());
+        groups.sort_unstable_by_key(|group| std::cmp::Reverse(group.len()));
+        for group in groups {
+            let next_hints = hints.map(|hints| {
+                hints.after_feedback(self.words[guess.0], self.pattern(guess, group[0]))
+            });
+            if !self.can_solve(&group, depth - 1, next_hints, stop)? {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
 
-    /// Candidate shortcuts remain legal in hard mode because every remaining
-    /// target satisfies the accumulated hints. Other guesses use the existing
-    /// largest-group / sum-of-squares heuristic.
-    fn rank_guesses(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, stop: &Cancellation) -> SearchOutcome<Vec<WordIndex>> {
-        if stop.is_cancelled() {
-            return SearchOutcome::Cancelled;
-        }
-        if candidates.is_empty() || depth == 0 {
-            return SearchOutcome::Impossible;
+    // Can we solve all possible target words with some (any) choice of the candidate words as our next guess?
+    // Mutually recursive with guess_works.
+    // None means cancelled, never a proof of failure and never memoized.
+    fn can_solve(&self, candidates: &[WordIndex], depth: usize, hints: Option<HardModeHints>, stop: &AtomicBool) -> Option<bool> {
+        if stop.load(Ordering::Relaxed) {
+            return None;
         }
         if candidates.len() <= depth {
-            return SearchOutcome::Solved(vec![candidates[0]]);
+            return Some(true);
         }
         if depth <= 1 || candidates.len() > capacity(depth) {
-            return SearchOutcome::Impossible;
+            return Some(false);
         }
+        // Every remaining target satisfies the hints, so sequential candidate
+        // guesses (including the shortcut above) remain legal in hard mode.
+        let state = GameState { candidates: candidates.to_vec(), depth, hints };
+        if let Some(&answer) = self.memo.lock().unwrap().get(&state) {
+            return Some(answer.is_some());
+        }
+
         let child_capacity = capacity(depth - 1);
         let mut ranked = Vec::new();
         for guess in (0..self.words.len()).map(WordIndex) {
-            if stop.is_cancelled() {
-                return SearchOutcome::Cancelled;
+            if stop.load(Ordering::Relaxed) {
+                return None;
             }
             if hints.is_some_and(|hints| !hints.allows(self.words[guess.0])) {
                 continue;
@@ -417,9 +439,6 @@ impl Search {
             let mut counts = [0usize; Result::COUNT];
             let mut largest = 0;
             for &target in candidates {
-                if stop.is_cancelled() {
-                    return SearchOutcome::Cancelled;
-                }
                 let pattern = self.pattern(guess, target);
                 if pattern != Result::ALL_GREEN {
                     counts[pattern.index()] += 1;
@@ -433,17 +452,21 @@ impl Search {
                 continue;
             }
             if largest < depth {
-                return SearchOutcome::Solved(vec![guess]);
+                self.memo.lock().unwrap().insert(state, Some(guess));
+                return Some(true);
             }
             let squares: usize = counts.iter().map(|&count| count * count).sum();
             ranked.push((largest, squares, guess));
         }
         ranked.sort_unstable();
-        if ranked.is_empty() {
-            SearchOutcome::Impossible
-        } else {
-            SearchOutcome::Solved(ranked.into_iter().map(|(_, _, guess)| guess).collect())
+        for (_, _, guess) in ranked {
+            if self.guess_works(candidates, depth, hints, guess, stop)? {
+                self.memo.lock().unwrap().insert(state, Some(guess));
+                return Some(true);
+            }
         }
+        self.memo.lock().unwrap().insert(state, None);
+        Some(false)
     }
 }
 
